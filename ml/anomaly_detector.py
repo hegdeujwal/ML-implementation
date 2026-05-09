@@ -64,8 +64,12 @@ logger = get_logger(__name__)
 # Add more as P1 ships them — just extend FEATURE_COLS below.
 FEATURE_COLS = [
     "frequency_score",
-    "severity_weight",
+    "burstiness_score",
+    "zscore_base",
     "time_delta_prev",
+    "time_delta_session_start",
+    "inter_arrival_rate",
+    "severity_weight",
     "counter_proximity",
 ]
 

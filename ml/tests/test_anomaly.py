@@ -53,24 +53,33 @@ def make_features_df(n: int = 200, add_outliers: bool = True) -> pd.DataFrame:
     rng = np.random.default_rng(seed=0)
 
     df = pd.DataFrame({
-        "log_id": [f"log_{i}" for i in range(n)],
-        "frequency_score": rng.normal(loc=1.0, scale=0.3, size=n).clip(0),
-        "severity_weight": rng.uniform(0.1, 0.5, size=n),
-        "temporal_delta": rng.exponential(scale=2.0, size=n),
-        "counter_proximity": rng.uniform(0, 0.2, size=n),
-        "session_id": [f"sess_{i // 20}" for i in range(n)],
-    })
+    "log_id": [f"log_{i}" for i in range(n)],
+    "frequency_score": rng.normal(loc=1.0, scale=0.3, size=n).clip(0),
+    "burstiness_score": rng.uniform(0.0, 0.5, size=n),
+    "zscore_base": rng.normal(0.0, 1.0, size=n),
+    "time_delta_prev": rng.exponential(scale=2.0, size=n),
+    "time_delta_session_start": rng.uniform(0.0, 300.0, size=n),
+    "inter_arrival_rate": rng.exponential(scale=5.0, size=n),
+    "severity_weight": rng.uniform(0.1, 0.5, size=n),
+    "counter_proximity": rng.uniform(0, 0.2, size=n),
+    "session_id": [f"sess_{i // 20}" for i in range(n)],
+})
+    
 
     if add_outliers:
         # Inject 5 rows with extreme feature values — these should be flagged
         outliers = pd.DataFrame({
-            "log_id": [f"outlier_{i}" for i in range(5)],
-            "frequency_score": [50.0, 45.0, 60.0, 55.0, 48.0],
-            "severity_weight": [1.0, 1.0, 1.0, 1.0, 1.0],
-            "temporal_delta": [100.0, 90.0, 120.0, 110.0, 95.0],
-            "counter_proximity": [1.0, 1.0, 1.0, 1.0, 1.0],
-            "session_id": ["sess_outlier"] * 5,
-        })
+        "log_id": [f"outlier_{i}" for i in range(5)],
+        "frequency_score": [50.0, 45.0, 60.0, 55.0, 48.0],
+        "burstiness_score": [5.0, 5.0, 5.0, 5.0, 5.0],
+        "zscore_base": [10.0, 9.0, 12.0, 11.0, 10.5],
+        "time_delta_prev": [100.0, 90.0, 120.0, 110.0, 95.0],
+        "time_delta_session_start": [900.0, 850.0, 950.0, 920.0, 880.0],
+        "inter_arrival_rate": [80.0, 75.0, 90.0, 85.0, 78.0],
+        "severity_weight": [1.0, 1.0, 1.0, 1.0, 1.0],
+        "counter_proximity": [1.0, 1.0, 1.0, 1.0, 1.0],
+        "session_id": ["sess_outlier"] * 5,
+})
         df = pd.concat([df, outliers], ignore_index=True)
 
     return df
