@@ -1,3 +1,17 @@
+"""
+Unit tests for feature engineering modules.
+
+Covers:
+- statistical features
+- temporal features
+- severity mapping
+- counter proximity logic
+- edge-case handling
+"""
+
+
+
+
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -101,3 +115,23 @@ def test_counter_proximity():
 
     assert "counter_proximity" in result.columns
     assert result["counter_proximity"].max() <= 1.0
+
+def test_missing_timestamp_handling():
+
+    df = sample_df()
+
+    df.loc[0, "timestamp"] = None
+
+    result = add_temporal_features(df.dropna(subset=["timestamp"]))
+
+    assert result.empty is False
+
+
+
+def test_single_log_session():
+
+    df = sample_df().iloc[:1]
+
+    result = burstiness_score(df)
+
+    assert result["burstiness_score"].iloc[0] == 0.0

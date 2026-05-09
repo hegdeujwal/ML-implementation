@@ -1,3 +1,13 @@
+"""
+Generates synthetic sessionized log data for testing.
+
+Creates realistic sample log sessions and stores them
+as a parquet file for feature pipeline validation.
+"""
+
+
+
+
 import pandas as pd
 from datetime import datetime, timedelta
 import random
