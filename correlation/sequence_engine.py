@@ -152,6 +152,12 @@ def detect_sequences(
     if missing:
         raise ValueError(f"detect_sequences: missing columns: {missing}")
 
+    # Normalise timestamp to float seconds (Unix epoch) so arithmetic works
+    # regardless of whether the upstream parquet stored datetime64 or float.
+    df = df.copy()
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = df["timestamp"].astype("int64") / 1e9
+
     df = df.sort_values(["session_id", "timestamp"]).reset_index(drop=True)
 
     # sequence_tuple -> {session_id -> [log_ids in that session]}
