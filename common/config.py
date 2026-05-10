@@ -129,3 +129,53 @@ FEATURE_COLUMNS = [
     "severity_weight",
     "counter_proximity",
 ]
+
+# ---------------------------------------------------------------------------
+# Phase 2 — ML Anomaly Detection
+# ---------------------------------------------------------------------------
+ 
+# IsolationForest contamination: expected fraction of anomalies in the dataset.
+# 0.05 = 5% anomaly rate assumption. Adjust if first-run anomaly rate looks off.
+# If you change this, document it in the JSON sidecar saved alongside the model.
+CONTAMINATION: float = 0.05
+ 
+# Hybrid score weights: combined_score = w1 * isolation_score + w2 * zscore_norm
+# Must sum to 1.0. w1 > w2 because IsolationForest captures feature interactions
+# that z-score misses; but z-score keeps the system interpretable.
+WEIGHT_ISOLATION: float = 0.65   # w1
+WEIGHT_ZSCORE: float = 0.35      # w2
+ 
+# A log is flagged is_anomaly=True when combined_score > this threshold.
+# 0.5 = middle of [0,1] range; tune upward to reduce false positives.
+ANOMALY_THRESHOLD: float = 0.5
+ 
+# Minimum number of log rows needed before IsolationForest training is attempted.
+# Below this, the system falls back to z-score only (cold-start mode).
+MIN_TRAIN_SAMPLES: int = 50
+ 
+# Sliding window retraining: only use logs from the last N sessions.
+# Prevents the model from memorising stale historical patterns.
+TRAINING_WINDOW_SESSIONS: int = 10
+ 
+# Periodic retraining trigger: retrain every K new log rows ingested.
+# Lower K = fresher model but more compute. Start high, tune down if needed.
+RETRAIN_EVERY_K_LOGS: int = 500
+ 
+# ---------------------------------------------------------------------------
+# Phase 4 — Importance Scoring (P4: Ujwal Hegde)
+# ---------------------------------------------------------------------------
+ 
+# Weights for the final importance score (ML + graph + rule-based signals)
+SCORING_WEIGHT_ML: float = 0.40
+SCORING_WEIGHT_GRAPH: float = 0.35
+SCORING_WEIGHT_RULE: float = 0.25
+ 
+# Label thresholds: ignore / low / medium / critical
+LABEL_IGNORE_MAX: float = 0.2
+LABEL_LOW_MAX: float = 0.5
+LABEL_MEDIUM_MAX: float = 0.75
+# Anything above LABEL_MEDIUM_MAX → critical
+ 
+# DBSCAN clustering parameters (incident_clusterer.py)
+DBSCAN_EPS: float = 0.3
+DBSCAN_MIN_SAMPLES: int = 5
