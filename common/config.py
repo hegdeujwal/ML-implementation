@@ -18,6 +18,31 @@ CORRELATION_TIME_WINDOW_SECONDS: int = 60
 # after profiling.
 MAX_GRAPH_NODES: int = 500
 
+# PageRank damping factor (standard value; literature range 0.8–0.9).
+PAGERANK_ALPHA: float = 0.85
+
+# Betweenness centrality approximation: number of pivot nodes sampled.
+# Full exact computation is O(V*E) which is impractical for graphs > 200 nodes.
+# k=50 gives a good bias-variance tradeoff for typical network-log graphs.
+BETWEENNESS_K: int = 50
+BETWEENNESS_LARGE_GRAPH_THRESHOLD: int = 200
+
+# Sequence engine parameters.
+# Window within which template B is considered a "follow-on" of template A.
+SEQUENCE_WINDOW_SECONDS: int = 30
+# A sequence must contain at least this many log templates.
+SEQUENCE_MIN_LENGTH: int = 3
+# A sequence must appear in at least this many distinct sessions.
+SEQUENCE_MIN_SUPPORT: int = 3
+
+# ---------------------------------------------------------------------------
+# Phase 3 output paths
+# ---------------------------------------------------------------------------
+GRAPH_PICKLE_PATH: str = "data/processed/correlation_graph.gpickle"
+GRAPH_JSON_PATH: str = "data/processed/correlation_graph.json"
+SEQUENCES_JSON_PATH: str = "data/processed/sequences.json"
+GRAPH_SCORES_PATH: str = "data/processed/graph_scores_df.parquet"
+
 
 # ---------------------------------------------------------------------------
 # Dynamic environment-variable access (credentials, service URLs, etc.)
