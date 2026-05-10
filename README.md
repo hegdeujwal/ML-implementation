@@ -365,3 +365,11 @@ Kibana is used for deep-dive searches and incident drill-downs.
    - Click the **`+` magnifying glass icon** next to any `incident_id` to instantly drill down and filter the entire view by that incident cluster.
 4. **View Data**:
    - Just like Grafana, ensure your time filter in the top-right corner is set to include **May 1, 2026**.
+scoring/tests/test_scoring.py
+```
+
+Run using:
+
+```bash
+pytest scoring/tests/test_scoring.py -v
+```
