@@ -25,14 +25,25 @@ Node cap
     nodes are always admitted regardless of the cap because they are injected
     explicitly by the caller.  See common/config.py for the cap value and a
     longer discussion of the memory / CPU trade-off.
+
+Real-data integration (Phase 3)
+    build_graph_from_parquet -- load sessionized_logs.parquet and call build_graph
+    correlation_graph_to_nx  -- convert CorrelationGraph to a networkx.Graph
+    persist_graph / load_graph -- pickle cache to skip rebuilds on repeat runs
 """
 
 from __future__ import annotations
 
 import itertools
+import os
+import pickle
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+import networkx as nx
+import pandas as pd
 
 import common.config as cfg
 
@@ -242,3 +253,136 @@ def build_graph(
     # If raw_co is empty the graph has nodes but no edges; that is valid.
 
     return graph
+
+
+# ---------------------------------------------------------------------------
+# Real-data integration helpers (Phase 3)
+# ---------------------------------------------------------------------------
+
+def build_graph_from_parquet(
+    path: str,
+    time_window_seconds: Optional[int] = None,
+    max_nodes: Optional[int] = None,
+) -> CorrelationGraph:
+    """Build a CorrelationGraph from a sessionized-log Parquet file.
+
+    Parameters
+    ----------
+    path : str
+        Path to the Parquet file.  Expected columns:
+            log_id        : str
+            session_id    : str
+            timestamp     : numeric (Unix epoch seconds) or datetime
+            template_id   : str  -- normalized log template
+            is_anomaly    : bool, optional  (defaults to False if absent)
+            anomaly_label : str, optional  (defaults to "" if absent)
+    time_window_seconds : int, optional
+        Override cfg.CORRELATION_TIME_WINDOW_SECONDS.
+    max_nodes : int, optional
+        Override cfg.MAX_GRAPH_NODES.
+
+    Returns
+    -------
+    CorrelationGraph
+    """
+    df = pd.read_parquet(path)
+
+    # Normalise timestamp to float epoch seconds
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = df["timestamp"].astype("int64") / 1e9
+    else:
+        df["timestamp"] = df["timestamp"].astype(float)
+
+    has_anomaly = "is_anomaly" in df.columns
+    has_label = "anomaly_label" in df.columns
+
+    events: List[LogEvent] = []
+    for row in df.itertuples(index=False):
+        is_anom = bool(getattr(row, "is_anomaly", False)) if has_anomaly else False
+        label = str(getattr(row, "anomaly_label", "") or "") if has_label else ""
+        events.append(LogEvent(
+            timestamp=row.timestamp,
+            template=row.template_id,
+            is_anomaly=is_anom,
+            anomaly_label=label if (is_anom and label) else None,
+        ))
+
+    return build_graph(events, time_window_seconds=time_window_seconds, max_nodes=max_nodes)
+
+
+def correlation_graph_to_nx(g: CorrelationGraph) -> nx.Graph:
+    """Convert a CorrelationGraph to a networkx.Graph.
+
+    Node attributes: node_type (str), count (int).
+    Edge attributes: co_occurrences (int), weight (float).
+
+    Parameters
+    ----------
+    g : CorrelationGraph
+
+    Returns
+    -------
+    nx.Graph
+        Undirected weighted graph.  The 'weight' attribute is used by
+        centrality.py for weighted betweenness and PageRank.
+    """
+    nx_graph = nx.Graph()
+
+    for node_id, node in g.nodes.items():
+        nx_graph.add_node(
+            node_id,
+            node_type=node.node_type,
+            count=node.count,
+        )
+
+    for (src, tgt), edge in g.edges.items():
+        nx_graph.add_edge(
+            src,
+            tgt,
+            co_occurrences=edge.co_occurrences,
+            weight=edge.weight,
+        )
+
+    return nx_graph
+
+
+def persist_graph(g: CorrelationGraph, path: str) -> None:
+    """Pickle a CorrelationGraph to disk.
+
+    Using Python's built-in pickle (not nx.write_gpickle, which was removed
+    in NetworkX 3.x) because CorrelationGraph is a pure-Python dataclass.
+
+    Parameters
+    ----------
+    g : CorrelationGraph
+    path : str
+        Destination file path (e.g. data/processed/correlation_graph.gpickle).
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        pickle.dump(g, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_graph(path: str) -> CorrelationGraph:
+    """Load a pickled CorrelationGraph from disk.
+
+    Parameters
+    ----------
+    path : str
+        Path to the pickle file written by persist_graph.
+
+    Returns
+    -------
+    CorrelationGraph
+
+    Raises
+    ------
+    FileNotFoundError if the pickle file does not exist.
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(
+            f"Cached graph not found at '{path}'.  "
+            "Run build_graph_from_parquet() first."
+        )
+    with open(path, "rb") as fh:
+        return pickle.load(fh)

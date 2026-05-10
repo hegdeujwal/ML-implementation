@@ -9,3 +9,4 @@ numpy
 joblib
 scipy
 pyarrow
+networkx>=3.2
