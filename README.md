@@ -4,20 +4,25 @@ This project is a comprehensive Machine Learning pipeline for network log analys
 
 ## Development Progress
 
-| Module                                  | Status      | Notes                                                           |
+| Module | Status | Notes |
 | --------------------------------------- | ----------- | --------------------------------------------------------------- |
-| `common/config.py`                      | Done        | Lazy env-var access + graph tuning constants                    |
-| `common/env_handler.py`                 | Done        | Fail-fast `.env` loader                                         |
-| `correlation/graph_builder.py`          | Done        | Co-occurrence graph, anomaly linkage, node cap                  |
-| `correlation/tests/test_correlation.py` | Done        | 23 unit tests, all passing                                      |
-| `ingestion/`                            | Skeleton    | Not yet implemented                                             |
-| `parsing/`                              | Skeleton    | Not yet implemented                                             |
-| `features/`                             | Skeleton    | Not yet implemented                                             |
-| `ml/`                                   | In Progress | Isolation Forest + Z-score hybrid anomaly detection implemented |
-| `scoring/` | Done | Full importance scoring, incident clustering, and root-cause analysis pipeline implemented |                                          |
-| `storage/`                              | Skeleton    | Not yet implemented                                             |
-| `visualization/`                        | Skeleton    | Not yet implemented                                             |
-| `evaluation/`                           | Skeleton    | Not yet implemented                                             |
+| `common/config.py` | Done | Lazy env-var access, graph + centrality + sequence constants |
+| `common/env_handler.py` | Done | Fail-fast `.env` loader |
+| `correlation/graph_builder.py` | Done | Co-occurrence graph, parquet loader, pickle cache, nx converter |
+| `correlation/centrality.py` | Done | Degree, betweenness (k-approx), PageRank; `graph_scores_df` assembly |
+| `correlation/sequence_engine.py` | Done | Session-scoped recurring sequence detection; `sequences.json` |
+| `correlation/graph_visualizer.py` | Done | JSON export of nodes + edges with centrality scores |
+| `correlation/run_correlation.py` | Done | End-to-end pipeline entry point |
+| `correlation/tests/test_correlation.py` | Done | 70 unit tests, all passing |
+| `scripts/generate_real_logs.py` | Done | Synthetic log generator (5 000 rows, 50 sessions, 20 templates) |
+| `ingestion/` | Skeleton | Not yet implemented |
+| `parsing/` | Skeleton | Not yet implemented |
+| `features/` | Skeleton | Not yet implemented |
+| `ml/` | In Progress | Isolation Forest + Z-score hybrid anomaly detection implemented |
+| `scoring/` | Done | Full importance scoring, incident clustering, root-cause analysis |
+| `storage/` | Skeleton | Not yet implemented |
+| `visualization/` | Skeleton | Not yet implemented |
+| `evaluation/` | Skeleton | Not yet implemented |
 
 ## Architecture & Modules
 
@@ -35,30 +40,96 @@ The project is structured into logical modules reflecting the steps in the ML pi
 - **`evaluation/`**: Contains scripts and utilities for evaluating model and pipeline performance.
 - **`pipeline.py`**: The central orchestrator script that ties the modules together.
 
-## Correlation Module
+## Correlation Module (Phase 3)
+
+### Overview
+
+Builds a weighted co-occurrence graph from sessionized log data, computes centrality
+scores for every template node, detects recurring ordered log sequences, and ships
+a per-log-row parquet file to the scoring stage (P4).
+
+### Components
+
+| File | Purpose |
+|---|---|
+| `graph_builder.py` | Build graph, load from parquet, pickle cache, NetworkX conversion |
+| `centrality.py` | Degree / betweenness / PageRank centrality; assemble `graph_scores_df` |
+| `sequence_engine.py` | Detect recurring ordered sequences across sessions |
+| `graph_visualizer.py` | Export graph as JSON for downstream visualization |
+| `run_correlation.py` | Pipeline entry point wiring all components |
 
 ### Graph Schema
 
 The correlation graph is a weighted undirected graph where:
 
-- **Node** = a unique log template string (from the parsing stage) or an anomaly marker
+- **Node** = a unique log template string or an anomaly marker
   - `id`: template string or `anomaly:<label>`
   - `node_type`: `"log_template"` or `"anomaly"`
   - `count`: raw occurrence frequency
 - **Edge** = co-occurrence within a configurable time window
   - `co_occurrences`: raw count of windows where both nodes appear together
-  - `weight`: normalized value in `(0, 1]`, where `1.0` is the most frequent co-occurring pair
+  - `weight`: normalized value in `(0, 1]`, where `1.0` is the most frequent pair
 
 ### Configuration (`common/config.py`)
 
-| Constant                          | Default | Description                                              |
-| --------------------------------- | ------- | -------------------------------------------------------- |
-| `CORRELATION_TIME_WINDOW_SECONDS` | `60`    | Window width for co-occurrence detection                 |
-| `MAX_GRAPH_NODES`                 | `500`   | Cap on template nodes; anomaly nodes are always admitted |
+| Constant | Default | Description |
+|---|---|---|
+| `CORRELATION_TIME_WINDOW_SECONDS` | `60` | Window width for co-occurrence detection |
+| `MAX_GRAPH_NODES` | `500` | Cap on template nodes; anomaly nodes always admitted |
+| `PAGERANK_ALPHA` | `0.85` | PageRank damping factor |
+| `BETWEENNESS_K` | `50` | Pivot samples for betweenness approximation |
+| `BETWEENNESS_LARGE_GRAPH_THRESHOLD` | `200` | Use k-approx when node count exceeds this |
+| `SEQUENCE_WINDOW_SECONDS` | `30` | Max elapsed time between events in a sequence |
+| `SEQUENCE_MIN_LENGTH` | `3` | Minimum templates per sequence |
+| `SEQUENCE_MIN_SUPPORT` | `3` | Minimum sessions exhibiting a sequence |
 
-### Running the Correlation Module
+### Output Contract (`graph_scores_df.parquet`)
 
-**Unit tests:**
+One row per log event. Consumed by the scoring module (P4).
+
+| Column | Type | Description |
+|---|---|---|
+| `log_id` | str | Unique log identifier |
+| `centrality_score` | float [0, 1] | PageRank score (primary signal for P4) |
+| `degree` | int | Raw edge count in the correlation graph |
+| `betweenness` | float [0, 1] | Normalized betweenness centrality |
+| `cluster_id` | str | Connected-component label (`cc_0`, `cc_1`, ...) |
+| `in_sequence` | bool | True if this log is part of a detected recurring sequence |
+| `correlated_log_ids` | list[str] | Other log_ids in the same session whose template is a graph neighbor |
+
+### Sequence Output (`sequences.json`)
+
+```json
+[
+  {
+    "sequence": ["IF_DOWN", "BGP_PEER_RESET", "OSPF_ADJACENCY_LOST"],
+    "support_count": 12,
+    "session_ids": ["session_001", "session_007"]
+  }
+]
+```
+
+### Running the Correlation Pipeline
+
+**Generate synthetic data** (first run or when you want fresh data):
+
+```bash
+python scripts/generate_real_logs.py
+```
+
+**Run the full pipeline:**
+
+```bash
+python -m correlation.run_correlation
+```
+
+Force graph rebuild (skip pickle cache):
+
+```bash
+REBUILD_GRAPH=1 python -m correlation.run_correlation
+```
+
+**Unit tests (70 tests):**
 
 ```bash
 python -m pytest correlation/tests/test_correlation.py -v
@@ -67,8 +138,18 @@ python -m pytest correlation/tests/test_correlation.py -v
 **Manual inspection (synthetic 5-node example):**
 
 ```bash
-python3 -m correlation.manual_test
+python -m correlation.manual_test
 ```
+
+### Output Files
+
+| File | Description |
+|---|---|
+| `data/processed/correlation_graph.gpickle` | Pickled graph (rebuild cache) |
+| `data/processed/sequences.json` | Detected recurring sequences |
+| `data/processed/graph_scores_df.parquet` | P4 handoff — one row per log |
+| `data/processed/correlation_graph.json` | Graph JSON for visualization |
+| `parsing/processed/sessionized_logs.parquet` | Sessionized log input |
 
 ## ML Module (Anomaly Detection)
 
@@ -365,11 +446,3 @@ Kibana is used for deep-dive searches and incident drill-downs.
    - Click the **`+` magnifying glass icon** next to any `incident_id` to instantly drill down and filter the entire view by that incident cluster.
 4. **View Data**:
    - Just like Grafana, ensure your time filter in the top-right corner is set to include **May 1, 2026**.
-scoring/tests/test_scoring.py
-```
-
-Run using:
-
-```bash
-pytest scoring/tests/test_scoring.py -v
-```
