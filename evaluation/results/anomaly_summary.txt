@@ -1,0 +1,22 @@
+
+ShreeRaksha  Phase 2 Anomaly Detection Evaluation
+
+Samples evaluated : 300
+Anomaly rate      : 0.1100 (11.0%)
+
+Classification metrics:
+  Precision        : 0.9091
+  Recall           : 1.0000
+  F1 Score         : 0.9524
+
+Confusion breakdown:
+  True Positives   : 30
+  False Positives  : 3
+  False Negatives  : 0
+
+Top 10 most anomalous log templates:
+   1. PORT_SCAN
+   2. NORMAL
+   3. CPU_HIGH
+   4. IF_DOWN
+   5. LOGIN_FAIL

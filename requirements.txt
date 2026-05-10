@@ -7,3 +7,5 @@ pytest
 scikit-learn
 numpy
 joblib
+scipy
+pyarrow
