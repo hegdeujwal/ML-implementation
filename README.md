@@ -320,3 +320,48 @@ Run using:
 ```bash
 pytest scoring/tests/test_scoring.py -v
 ```
+data/processed/scored_logs_df.parquet
+```
+
+## Visualizing Results (Grafana & Kibana)
+
+After deploying the infrastructure using Docker Compose (`docker compose up -d`), you can visualize the log data and anomaly scores.
+
+### 1. Seed Synthetic Data
+If you haven't processed real logs yet, you can seed the databases with synthetic testing data (generated for **May 1, 2026**):
+```bash
+python3 -m storage.db_writer
+python3 -m storage.es_writer
+```
+
+### 2. Grafana Dashboard
+Grafana is used to visualize log importance scores and anomaly rates over time.
+1. Open **[http://localhost:3000](http://localhost:3000)** (Default login: `admin` / `admin`).
+2. **Add PostgreSQL Data Source**:
+   - Go to **Connections** → **Data sources** → **Add data source** → **PostgreSQL**.
+   - **Host URL**: `postgres:5432`
+   - **Database name**: `log-postgres`
+   - **Username**: `log-user`
+   - **Password**: `akjdnsadn123^^jas`
+   - **TLS/SSL Mode**: `disable`
+   - Click **Save & test**.
+3. **Import Dashboard**:
+   - Go to **Dashboards** → **New** → **Import**.
+   - Upload `visualization/grafana/dashboard.json`.
+   - Select the PostgreSQL data source you just created and click **Import**.
+4. **View Data**:
+   - Since the synthetic data is seeded for May 2026, **change the time filter** in the top-right corner to include **May 1, 2026**.
+
+### 3. Kibana Dashboard
+Kibana is used for deep-dive searches and incident drill-downs.
+1. Open **[http://localhost:5601](http://localhost:5601)** (No login required).
+2. **Import Dashboard**:
+   - Go to the **Hamburger Menu** → **Stack Management** → **Saved Objects**.
+   - Click **Import** and upload `visualization/kibana/dashboard.ndjson`.
+3. **View Dashboards & Drill-down**:
+   - Go to **Analytics** → **Dashboard** and open **`Logs_Dash`**.
+   - Go to **Analytics** → **Discover** and open the **`All_Logs`** saved search.
+   - You will see a data table with custom columns (`timestamp`, `incident_id`, `label`, `final_score`, `raw_text`).
+   - Click the **`+` magnifying glass icon** next to any `incident_id` to instantly drill down and filter the entire view by that incident cluster.
+4. **View Data**:
+   - Just like Grafana, ensure your time filter in the top-right corner is set to include **May 1, 2026**.
