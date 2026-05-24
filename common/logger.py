@@ -2,15 +2,29 @@
 common/logger.py
 ================
 Shared logging setup. All modules call get_logger(__name__).
-Logs go to stdout and to logs/pipeline.log.
+
+Logs to stdout with format: [TIMESTAMP] [LEVEL] [module_name] message
+Also writes DEBUG+ to logs/pipeline.log.
+
+Log level is controlled by the LOG_LEVEL environment variable (default: INFO).
+Set LOG_LEVEL=DEBUG in your .env to enable verbose output.
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
+
+# Read log level from environment; config.py documents this constant.
+# Reading from os.environ directly avoids a circular import with config.py.
+_CONSOLE_LEVEL = getattr(
+    logging,
+    os.environ.get("LOG_LEVEL", "INFO").upper(),
+    logging.INFO,
+)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -25,7 +39,6 @@ def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
 
     if logger.handlers:
-        # Avoid adding duplicate handlers if get_logger is called multiple times
         return logger
 
     logger.setLevel(logging.DEBUG)
@@ -34,13 +47,11 @@ def get_logger(name: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(_CONSOLE_LEVEL)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 
-    # File handler
     fh = logging.FileHandler(LOG_DIR / "pipeline.log")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)

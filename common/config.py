@@ -1,6 +1,15 @@
 from common.env_handler import get_env
 
 # ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Console log level for all modules using common/logger.py.
+# The logger reads this via os.environ["LOG_LEVEL"] to avoid a circular import.
+# Set LOG_LEVEL=DEBUG in your .env for verbose output.
+LOG_LEVEL: str = "INFO"
+
+# ---------------------------------------------------------------------------
 # Correlation / Graph parameters
 # ---------------------------------------------------------------------------
 
@@ -133,7 +142,7 @@ INTER_ARRIVAL_EMA_SPAN: int = 5
 
 # Feature pipeline paths
 SESSIONIZED_LOGS_PATH: str = (
-    "parsing/processed/sessionized_logs.parquet"
+    "data/processed/sessionized_logs.parquet"
 )
 
 FEATURES_OUTPUT_PATH: str = (
