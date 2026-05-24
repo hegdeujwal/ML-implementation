@@ -2,6 +2,64 @@
 
 This project is a comprehensive Machine Learning pipeline for network log analysis. It covers the full lifecycle from data ingestion to anomaly detection, correlation, log importance scoring, data storage, and visualization.
 
+## Quickstart
+
+```bash
+# 1. Start infrastructure (Postgres, Elasticsearch, Grafana, Kibana)
+docker compose up -d
+
+# 2. Set up environment
+cp .env.example .env          # fill in credentials
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Run the full pipeline (dry-run — skips Postgres write)
+python pipeline.py --dry-run
+
+# 4. Run with Postgres write (requires docker compose up)
+python pipeline.py
+
+# 5. Restart from a specific step (reads existing parquets for earlier steps)
+python pipeline.py --dry-run --from-step scoring
+```
+
+If you have a real syslog file, pass it with `--log-file`:
+```bash
+python pipeline.py --dry-run --log-file data/raw/cx_switches.log
+```
+
+Without a log file, the pipeline generates 5 000 rows of synthetic CX switch data automatically.
+
+## Module Overview
+
+| Folder | Owner | Output file | Description |
+|--------|-------|-------------|-------------|
+| `ingestion/` | Sumukha Rao H | `data/raw/*.log` | Raw log ingestion (batch or Fluent Bit stream) |
+| `parsing/` | Sumukha Rao H | `data/processed/sessionized_logs.parquet` | Drain-style parsing + sessionization |
+| `features/` | Sharva | `data/processed/features_df.parquet` | Statistical + temporal + severity feature engineering |
+| `ml/` | Shreeraksha M | `data/processed/anomaly_df.parquet` | IsolationForest + z-score hybrid anomaly detection |
+| `correlation/` | Sumukha Rao H | `data/processed/graph_scores_df.parquet` | Co-occurrence graph, centrality scores, sequence detection |
+| `scoring/` | Ujwal Hegde | `data/processed/scored_logs_df.parquet` | Final importance score, labels, incident clustering |
+| `storage/` | — | Postgres / Elasticsearch | Persistence layer |
+| `common/` | Sumukha Rao H | — | Shared config, logger, utils, schema definitions |
+| `pipeline.py` | Sumukha Rao H | all of the above | End-to-end orchestrator |
+
+### sessionized_logs.parquet schema (canonical — all downstream modules read from this)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `log_id` | str | Unique per-row identifier, e.g. `log_000001` |
+| `raw_text` | str | Original unparsed log line |
+| `timestamp` | datetime64 | UTC datetime |
+| `source` | str | Hostname / device |
+| `session_id` | str | Session group, e.g. `session_0001` |
+| `template_id` | str | Drain template slug, e.g. `IF_DOWN` |
+| `severity` | str | `CRITICAL` / `ERROR` / `WARN` / `INFO` |
+| `log_level` | str | Alias of `severity` (backwards compat) |
+| `is_anomaly` | bool | Set by anomaly detector; always `False` from parsing |
+| `anomaly_label` | str | Non-empty only when `is_anomaly=True` |
+
 ## Development Progress
 
 | Module | Status | Notes |
@@ -15,14 +73,16 @@ This project is a comprehensive Machine Learning pipeline for network log analys
 | `correlation/run_correlation.py` | Done | End-to-end pipeline entry point |
 | `correlation/tests/test_correlation.py` | Done | 70 unit tests, all passing |
 | `scripts/generate_real_logs.py` | Done | Synthetic log generator (5 000 rows, 50 sessions, 20 templates) |
-| `ingestion/` | Skeleton | Not yet implemented |
-| `parsing/` | Skeleton | Not yet implemented |
-| `features/` | Skeleton | Not yet implemented |
-| `ml/` | In Progress | Isolation Forest + Z-score hybrid anomaly detection implemented |
+| `ingestion/` | Done | `batch_loader.py` + documented `fluent_bit.conf` |
+| `parsing/` | Done | Drain parser, normalizer, sessionizer, template extractor |
+| `features/` | Done | Statistical + temporal + severity + counter proximity features |
+| `ml/` | Done | Isolation Forest + Z-score hybrid anomaly detection |
 | `scoring/` | Done | Full importance scoring, incident clustering, root-cause analysis |
-| `storage/` | Skeleton | Not yet implemented |
-| `visualization/` | Skeleton | Not yet implemented |
-| `evaluation/` | Skeleton | Not yet implemented |
+| `storage/` | Done | Postgres upsert writer; Elasticsearch writer |
+| `common/` | Done | Config, logger, utils, Pydantic-style schema definitions |
+| `pipeline.py` | Done | End-to-end orchestrator with `--dry-run` and `--from-step` |
+| `visualization/` | Skeleton | Grafana + Kibana dashboards (see infra setup below) |
+| `evaluation/` | Skeleton | Latency benchmark + metrics report |
 
 ## Architecture & Modules
 
