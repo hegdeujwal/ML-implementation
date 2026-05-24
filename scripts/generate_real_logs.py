@@ -204,7 +204,7 @@ def generate_dataset(seed: int = RANDOM_SEED) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    output_path = "parsing/processed/sessionized_logs.parquet"
+    output_path = "data/processed/sessionized_logs.parquet"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     print("Generating synthetic sessionized log data...")

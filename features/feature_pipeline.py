@@ -115,5 +115,5 @@ def run_pipeline(input_path: str):
 if __name__ == "__main__":
 
     run_pipeline(
-        "parsing/processed/sessionized_logs.parquet"
+        "data/processed/sessionized_logs.parquet"
     )
