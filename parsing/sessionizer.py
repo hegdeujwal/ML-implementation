@@ -134,12 +134,13 @@ def run(
                 parsed["message"], log_id=log_id
             )
 
-            # Parse directly to naive datetime — no epoch round-trip to avoid
-            # local-timezone shifts on machines not running UTC
-            try:
-                ts_dt = datetime.strptime(parsed["timestamp"], "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                ts_dt = datetime.utcnow()
+            # normalizer now returns a datetime object directly
+            ts_dt = parsed["timestamp"]
+            if not isinstance(ts_dt, datetime):
+                try:
+                    ts_dt = datetime.strptime(str(ts_dt), "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    ts_dt = datetime.utcnow()
 
             rows.append({
                 "log_id": log_id,
