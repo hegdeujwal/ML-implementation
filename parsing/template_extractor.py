@@ -33,10 +33,10 @@ def extract_templates(df: pd.DataFrame) -> pd.DataFrame:
     """Compute template frequency statistics from a sessionized DataFrame.
 
     Args:
-        df: DataFrame containing at minimum 'template_id' and 'severity' columns.
+        df: DataFrame containing at minimum 'template_id' and 'log_level' columns.
 
     Returns:
-        DataFrame with columns: template_id, count, pct, top_severity.
+        DataFrame with columns: template_id, count, pct, top_log_level.
         Sorted descending by count.
     """
     total = len(df)
@@ -44,7 +44,7 @@ def extract_templates(df: pd.DataFrame) -> pd.DataFrame:
         df.groupby("template_id")
         .agg(
             count=("template_id", "size"),
-            top_severity=("severity", lambda s: s.mode().iloc[0] if not s.empty else "INFO"),
+            top_log_level=("log_level", lambda s: s.mode().iloc[0] if not s.empty else "INFO"),
         )
         .reset_index()
     )
@@ -84,12 +84,12 @@ def run(
     print(f"\n{'='*55}")
     print(f"  Template summary — {len(templates)} unique templates")
     print(f"{'='*55}")
-    print(f"{'template_id':<35} {'count':>8}  {'%':>6}  severity")
+    print(f"{'template_id':<35} {'count':>8}  {'%':>6}  log_level")
     print("-" * 55)
     for _, row in templates.iterrows():
         print(
             f"{row['template_id']:<35} {int(row['count']):>8}  "
-            f"{row['pct']:>5.1f}%  {row['top_severity']}"
+            f"{row['pct']:>5.1f}%  {row['top_log_level']}"
         )
     print("=" * 55)
 

@@ -68,8 +68,8 @@ def _is_variable(token: str) -> bool:
 @dataclass
 class LogCluster:
     """A single log template cluster."""
-    template: List[str]       # list of tokens; variable positions hold WILDCARD
-    log_ids: List[str] = field(default_factory=list)
+    template: List[str]           # list of tokens; variable positions hold WILDCARD
+    sequence_numbers: List[int] = field(default_factory=list)
     count: int = 0
 
     def template_str(self) -> str:
@@ -124,13 +124,13 @@ class DrainParser:
     # ------------------------------------------------------------------
 
     def add_log_message(
-        self, message: str, log_id: Optional[str] = None
+        self, message: str, sequence_number: Optional[int] = None
     ) -> Tuple[str, str]:
         """Parse one log message and return its template.
 
         Args:
-            message: The raw log message text (no timestamp/hostname prefix).
-            log_id:  Optional identifier stored in the cluster for tracing.
+            message:         The raw log message text (no timestamp/hostname prefix).
+            sequence_number: Optional row identifier stored in the cluster for tracing.
 
         Returns:
             (template_id, template_string) tuple.
@@ -139,7 +139,7 @@ class DrainParser:
         if not tokens:
             return "EMPTY", "<empty>"
 
-        cluster = self._match_or_create(tokens, log_id)
+        cluster = self._match_or_create(tokens, sequence_number)
         return cluster.template_id(), cluster.template_str()
 
     def all_templates(self) -> List[Tuple[str, str, int]]:
@@ -162,7 +162,7 @@ class DrainParser:
         return [WILDCARD if _is_variable(t) else t for t in raw]
 
     def _match_or_create(
-        self, tokens: List[str], log_id: Optional[str]
+        self, tokens: List[str], sequence_number: Optional[int]
     ) -> LogCluster:
         length = len(tokens)
         first = tokens[0] if tokens[0] != WILDCARD else "<*>"
@@ -181,14 +181,13 @@ class DrainParser:
         if best_sim >= self.sim_threshold and best_cluster is not None:
             self._update_template(best_cluster, tokens)
             best_cluster.count += 1
-            if log_id:
-                best_cluster.log_ids.append(log_id)
+            if sequence_number is not None:
+                best_cluster.sequence_numbers.append(sequence_number)
             return best_cluster
 
-        # Create new cluster
         new_cluster = LogCluster(template=list(tokens), count=1)
-        if log_id:
-            new_cluster.log_ids.append(log_id)
+        if sequence_number is not None:
+            new_cluster.sequence_numbers.append(sequence_number)
 
         if len(candidates) < self.max_children:
             candidates.append(new_cluster)

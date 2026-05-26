@@ -80,41 +80,6 @@ ML_CONFIG = {
 # Controls contribution of each signal to final score
 # ----------------------------
 
-# ----------------------------
-# Weights for final importance score
-# ----------------------------
-ML_WEIGHT: float = 0.4
-GRAPH_WEIGHT: float = 0.35
-RULE_WEIGHT: float = 0.25
-
-
-# ----------------------------
-# Label thresholds
-# ----------------------------
-LABEL_THRESHOLDS = {
-    "ignore": (0.0, 0.2),
-    "low": (0.2, 0.5),
-    "medium": (0.5, 0.75),
-    "critical": (0.75, 1.0),
-}
-
-# ----------------------------
-# DBSCAN parameters (for clustering)
-# ----------------------------
-DBSCAN_EPS: float = 0.5
-DBSCAN_MIN_SAMPLES: int = 5
-
-"""
-Central configuration file for shared project constants.
-
-Contains:
-- ML settings
-- feature engineering thresholds
-- scoring weights
-- pipeline configuration values
-
-Avoid hardcoding constants in module files.
-"""
 # Severity weights
 SEVERITY_WEIGHTS = {
     "CRITICAL": 1.0,
@@ -128,6 +93,27 @@ DEFAULT_SEVERITY_WEIGHT: float = 0.1
 
 # Counter anomaly proximity
 COUNTER_PROXIMITY_WINDOW_SECONDS: int = 30
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Parsing
+# ---------------------------------------------------------------------------
+
+SESSION_GAP_SECONDS: int = 1800  # 30-min inactivity gap within same host → new session
+
+# Daemon/process name → canonical subsystem label.
+# Only entries where the raw process name is ambiguous or non-standard need to be listed.
+# All other names are upper-cased and used as-is (e.g. "OSPF" → "OSPF").
+SERVICE_ALIAS_MAP: dict = {
+    "eventmgr":    "SYSTEM",
+    "hpe-routing": "ROUTING",
+    "kernel":      "SYSTEM",
+    "sshd":        "SYSTEM",
+    "cron":        "SYSTEM",
+    "sudo":        "SYSTEM",
+    "snmpd":       "SNMP",
+    "lldpd":       "LLDP",
+    "cfgd":        "CONFIG",
+}
 
 
 # Statistical features
@@ -152,15 +138,15 @@ FEATURES_OUTPUT_PATH: str = (
 
 # Feature dataframe schema contract
 FEATURE_COLUMNS = [
-    "log_id",
+    "sequence_number",
     "session_id",
-    "frequency_score",
+    "frequency",
+    "event_weight",
     "burstiness_score",
     "zscore_base",
     "time_delta_prev",
     "time_delta_session_start",
     "inter_arrival_rate",
-    "severity_weight",
     "counter_proximity",
 ]
 

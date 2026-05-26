@@ -6,35 +6,37 @@ Converts a raw syslog file into sessionized_logs.parquet.
 Pipeline
 --------
 1. Read raw log lines from the input file.
-2. Normalize each line via normalizer.normalize_line().
-3. Parse the message through DrainParser to obtain a template_id.
-4. Group events into sessions: same source + no gap > SESSION_GAP_SECONDS.
-5. Write data/processed/sessionized_logs.parquet.
+2. Normalize each line via normalizer.normalize_line() →
+   {raw_text, timestamp, host, service, log_level, message}.
+3. Parse the message through DrainParser to obtain template_id.
+4. Group events into sessions: same host + no gap > SESSION_GAP_SECONDS.
+5. Derive event_type (= service) and event_action (= template_id with
+   service prefix stripped, or first-underscore split as fallback).
+6. Compute frequency: count of this template_id within its session.
+7. Write data/processed/sessionized_logs.parquet.
 
-Output schema (sessionized_logs.parquet)
------------------------------------------
-log_id       str    -- unique per-row identifier, e.g. "log_000001"
-raw_text     str    -- original unparsed line
-timestamp    datetime -- UTC datetime (datetime64[us] in parquet)
-source       str    -- hostname / device
-session_id   str    -- groups related events, e.g. "session_001"
-template_id  str    -- Drain template slug, e.g. "INTERFACE_DOWN"
-severity     str    -- CRITICAL / ERROR / WARN / INFO
-log_level    str    -- alias of severity (kept for backwards compatibility)
-is_anomaly   bool   -- always False from parsing; set by anomaly_detector
-anomaly_label str   -- empty string; populated by anomaly_detector
-
-Known limitations
------------------
-- Sessions are defined purely by time gap within the same source.
-  This is a first-order approximation; real session logic may factor in
-  protocol resets or configuration events.
-- The parser is stateless between calls to run(); each call trains a fresh
-  DrainParser instance, so templates are not persisted across runs.
+Output schema
+-------------
+sequence_number  int       -- universal join key (1-based, monotonically increasing)
+timestamp        datetime
+source_type      str       -- always 'switch' for HPE CX logs
+service          str       -- normalised subsystem name (OSPF, BGP, SYSTEM, ...)
+host             str       -- device hostname
+log_level        str       -- CRITICAL | ERROR | WARN | INFO
+event_type       str       -- subsystem label (= service)
+event_action     str       -- specific action (template_id minus service prefix)
+template_id      str       -- Drain template slug
+frequency        int       -- count of this template in the same session
+event_weight     float     -- severity weight: CRITICAL=1.0, ERROR=0.7, WARN=0.4, INFO=0.1
+message          str       -- log message content (severity tokens stripped for Drain)
+metadata         str       -- JSON: {"raw_text": "<original line>"}
+session_id       str       -- groups related events; not in canonical DB schema
+                              but kept here for downstream feature engineering
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -42,72 +44,94 @@ import pandas as pd
 
 from parsing.normalizer import normalize_line
 from parsing.log_parser import DrainParser
+from common.config import (
+    SESSION_GAP_SECONDS,
+    SESSIONIZED_LOGS_PATH,
+    SEVERITY_WEIGHTS,
+    DEFAULT_SEVERITY_WEIGHT,
+)
 from common.logger import get_logger
+from common.utils import save_parquet, validate_schema
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-SESSION_GAP_SECONDS: int = 1800   # 30-minute inactivity gap starts a new session
-DEFAULT_OUTPUT_PATH: str = "data/processed/sessionized_logs.parquet"
-
 REQUIRED_OUTPUT_COLUMNS = [
-    "log_id",
-    "raw_text",
+    "sequence_number",
     "timestamp",
-    "source",
-    "session_id",
-    "template_id",
-    "severity",
+    "source_type",
+    "service",
+    "host",
     "log_level",
-    "is_anomaly",
-    "anomaly_label",
+    "event_type",
+    "event_action",
+    "template_id",
+    "frequency",
+    "event_weight",
+    "message",
+    "metadata",
+    "session_id",
 ]
 
 
 # ---------------------------------------------------------------------------
-# Sessionizer logic
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _assign_sessions(df: pd.DataFrame) -> pd.DataFrame:
-    """Add a session_id column by grouping on source + time gap."""
-    df = df.sort_values(["source", "timestamp"]).reset_index(drop=True)
+    """Add session_id column by grouping on host + time gap."""
+    df = df.sort_values(["host", "timestamp"]).reset_index(drop=True)
 
-    # Compute seconds between consecutive rows per source for gap detection
     ts_series = pd.to_datetime(df["timestamp"])
     gap_seconds = ts_series.diff().dt.total_seconds().fillna(float("inf"))
-    src_changed = df["source"] != df["source"].shift(1)
+    host_changed = df["host"] != df["host"].shift(1)
 
     session_ids = []
-    session_counter = 0
-
+    counter = 0
     for i in range(len(df)):
-        if src_changed.iloc[i] or gap_seconds.iloc[i] > SESSION_GAP_SECONDS:
-            session_counter += 1
-        session_ids.append(f"session_{session_counter:04d}")
+        if host_changed.iloc[i] or gap_seconds.iloc[i] > SESSION_GAP_SECONDS:
+            counter += 1
+        session_ids.append(f"session_{counter:04d}")
 
     df["session_id"] = session_ids
     return df
 
 
+def _derive_event_action(service: str, template_id: str) -> str:
+    """Return the action portion of template_id with the service prefix removed.
+
+    e.g. service="OSPF", template_id="OSPF_NEIGHBOR_STATE_CHANGE"
+         → "NEIGHBOR_STATE_CHANGE"
+
+    Falls back to splitting on the first underscore when the template_id does
+    not start with the service name.
+    """
+    prefix = service + "_"
+    if template_id.startswith(prefix):
+        return template_id[len(prefix):]
+    parts = template_id.split("_", 1)
+    return parts[1] if len(parts) > 1 else template_id
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def run(
     input_path: str,
-    output_path: str = DEFAULT_OUTPUT_PATH,
+    output_path: str = SESSIONIZED_LOGS_PATH,
 ) -> pd.DataFrame:
     """Parse a raw syslog file and write sessionized_logs.parquet.
 
     Args:
         input_path:  Path to a raw syslog text file.
-        output_path: Destination parquet path (created with parent dirs).
+        output_path: Destination parquet path (parent dirs created if needed).
 
     Returns:
         The sessionized DataFrame.
 
     Raises:
         FileNotFoundError: If input_path does not exist.
-        ValueError: If no parseable log lines are found.
+        ValueError:        If no parseable log lines are found.
     """
     input_path = Path(input_path)
     if not input_path.exists():
@@ -117,7 +141,7 @@ def run(
 
     parser = DrainParser()
     rows = []
-    log_counter = 0
+    seq_num = 0
     skipped = 0
 
     with open(input_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -127,30 +151,24 @@ def run(
                 skipped += 1
                 continue
 
-            log_counter += 1
-            log_id = f"log_{log_counter:06d}"
-
+            seq_num += 1
             template_id, _ = parser.add_log_message(
-                parsed["message"], log_id=log_id
+                parsed["message"], sequence_number=seq_num
             )
 
-            # normalizer now returns a datetime object directly
-            ts_dt = parsed["timestamp"]
-            if not isinstance(ts_dt, datetime):
-                try:
-                    ts_dt = datetime.strptime(str(ts_dt), "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    ts_dt = datetime.utcnow()
-
             rows.append({
-                "log_id": log_id,
-                "raw_text": parsed["raw_text"],
-                "timestamp": ts_dt,
-                "source": parsed["source"],
+                "sequence_number": seq_num,
+                "timestamp": parsed["timestamp"],
+                "source_type": "switch",
+                "service": parsed["service"],
+                "host": parsed["host"],
+                "log_level": parsed["log_level"],
                 "template_id": template_id,
-                "severity": parsed["severity"],
-                "is_anomaly": False,
-                "anomaly_label": "",
+                "event_weight": SEVERITY_WEIGHTS.get(
+                    parsed["log_level"], DEFAULT_SEVERITY_WEIGHT
+                ),
+                "message": parsed["message"],
+                "_raw_text": parsed["raw_text"],
             })
 
     if not rows:
@@ -159,25 +177,31 @@ def run(
             "Check that the file contains syslog-formatted entries."
         )
 
-    logger.info(
-        f"Parsed {len(rows):,} lines ({skipped} skipped) from {input_path}"
-    )
+    logger.info(f"Parsed {len(rows):,} lines ({skipped} skipped) from {input_path}")
 
     df = pd.DataFrame(rows)
     df = _assign_sessions(df)
 
-    # log_level is an alias for severity (backwards compat with features module)
-    df["log_level"] = df["severity"]
+    df["event_type"] = df["service"]
+    df["event_action"] = df.apply(
+        lambda r: _derive_event_action(r["service"], r["template_id"]), axis=1
+    )
 
-    # Reorder to canonical schema
-    df = df[REQUIRED_OUTPUT_COLUMNS]
+    # frequency: count of this template_id within its session
+    df["frequency"] = (
+        df.groupby(["session_id", "template_id"])["template_id"]
+        .transform("count")
+        .astype(int)
+    )
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_path, index=False)
+    df["metadata"] = df["_raw_text"].apply(lambda t: json.dumps({"raw_text": t}))
+    df = df.drop(columns=["_raw_text"])
+
+    validate_schema(df, REQUIRED_OUTPUT_COLUMNS)
+    save_parquet(df[REQUIRED_OUTPUT_COLUMNS], output_path)
 
     logger.info(
-        f"Wrote {len(df):,} rows -> {output_path} "
+        f"Wrote {len(df):,} rows → {output_path} "
         f"({df['session_id'].nunique()} sessions, "
         f"{df['template_id'].nunique()} templates)"
     )
@@ -200,8 +224,8 @@ if __name__ == "__main__":
     )
     ap.add_argument(
         "--output",
-        default=DEFAULT_OUTPUT_PATH,
-        help=f"Output parquet path (default: {DEFAULT_OUTPUT_PATH})",
+        default=SESSIONIZED_LOGS_PATH,
+        help=f"Output parquet path (default: {SESSIONIZED_LOGS_PATH})",
     )
     args = ap.parse_args()
 

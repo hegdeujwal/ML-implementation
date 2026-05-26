@@ -483,7 +483,7 @@ Grafana is used to visualize log importance scores and anomaly rates over time.
    - **Host URL**: `postgres:5432`
    - **Database name**: `log-postgres`
    - **Username**: `log-user`
-   - **Password**: `akjdnsadn123^^jas`
+   - **Password**: `[PASSWORD]`
    - **TLS/SSL Mode**: `disable`
    - Click **Save & test**.
 3. **Import Dashboard**:
