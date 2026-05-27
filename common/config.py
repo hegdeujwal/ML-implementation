@@ -1,6 +1,15 @@
 from common.env_handler import get_env
 
 # ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Console log level for all modules using common/logger.py.
+# The logger reads this via os.environ["LOG_LEVEL"] to avoid a circular import.
+# Set LOG_LEVEL=DEBUG in your .env for verbose output.
+LOG_LEVEL: str = "INFO"
+
+# ---------------------------------------------------------------------------
 # Correlation / Graph parameters
 # ---------------------------------------------------------------------------
 
@@ -71,41 +80,6 @@ ML_CONFIG = {
 # Controls contribution of each signal to final score
 # ----------------------------
 
-# ----------------------------
-# Weights for final importance score
-# ----------------------------
-ML_WEIGHT: float = 0.4
-GRAPH_WEIGHT: float = 0.35
-RULE_WEIGHT: float = 0.25
-
-
-# ----------------------------
-# Label thresholds
-# ----------------------------
-LABEL_THRESHOLDS = {
-    "ignore": (0.0, 0.2),
-    "low": (0.2, 0.5),
-    "medium": (0.5, 0.75),
-    "critical": (0.75, 1.0),
-}
-
-# ----------------------------
-# DBSCAN parameters (for clustering)
-# ----------------------------
-DBSCAN_EPS: float = 0.5
-DBSCAN_MIN_SAMPLES: int = 5
-
-"""
-Central configuration file for shared project constants.
-
-Contains:
-- ML settings
-- feature engineering thresholds
-- scoring weights
-- pipeline configuration values
-
-Avoid hardcoding constants in module files.
-"""
 # Severity weights
 SEVERITY_WEIGHTS = {
     "CRITICAL": 1.0,
@@ -120,20 +94,56 @@ DEFAULT_SEVERITY_WEIGHT: float = 0.1
 # Counter anomaly proximity
 COUNTER_PROXIMITY_WINDOW_SECONDS: int = 30
 
+# ---------------------------------------------------------------------------
+# Phase 1 — Parsing
+# ---------------------------------------------------------------------------
+
+SESSION_GAP_SECONDS: int = 1800  # 30-min inactivity gap within same host → new session
+
+# All current ingestion is HPE CX switch logs — revisit when multi-device support is added
+DEFAULT_SOURCE_TYPE: str = "switch"
+
+# Daemon/process name → canonical subsystem label.
+# Only entries where the raw process name is ambiguous or non-standard need to be listed.
+# All other names are upper-cased and used as-is (e.g. "OSPF" → "OSPF").
+SERVICE_ALIAS_MAP: dict = {
+    "eventmgr":    "SYSTEM",
+    "hpe-routing": "ROUTING",
+    "kernel":      "SYSTEM",
+    "sshd":        "SYSTEM",
+    "cron":        "SYSTEM",
+    "sudo":        "SYSTEM",
+    "snmpd":       "SNMP",
+    "lldpd":       "LLDP",
+    "cfgd":        "CONFIG",
+}
+
 
 # Statistical features
 ZSCORE_ROLLING_WINDOW: int = 60
 ZSCORE_MIN_STD: float = 1e-6
 BURSTINESS_MIN_EVENTS: int = 2
 
+# Feature engineering — zscore baseline
+ZSCORE_BASELINE_N_SESSIONS: int = 20  # rolling window: last N sessions per host
 
-# Temporal features
-INTER_ARRIVAL_EMA_SPAN: int = 5
+# Feature engineering — inter arrival rate
+IAR_EMA_ALPHA: float = 0.3  # EMA smoothing factor, per session scope only
+
+# Counter proximity — regex patterns that identify counter/interface anomaly templates
+COUNTER_ANOMALY_PATTERNS: list = [
+    r"INTERFACE_.*THRESHOLD",
+    r"INTERFACE_.*ERROR.*EXCEED",
+    r"INTERFACE_.*DROP.*EXCEED",
+]
+# Hint keywords — templates containing these but not matching COUNTER_ANOMALY_PATTERNS
+# trigger a WARNING so the pattern list can be updated as new templates are discovered
+COUNTER_ANOMALY_HINT_KEYWORDS: list = ["THRESHOLD", "ERROR", "DROP", "EXCEED"]
 
 
 # Feature pipeline paths
 SESSIONIZED_LOGS_PATH: str = (
-    "parsing/processed/sessionized_logs.parquet"
+    "data/processed/sessionized_logs.parquet"
 )
 
 FEATURES_OUTPUT_PATH: str = (
@@ -143,15 +153,18 @@ FEATURES_OUTPUT_PATH: str = (
 
 # Feature dataframe schema contract
 FEATURE_COLUMNS = [
-    "log_id",
+    "sequence_number",
     "session_id",
+    "template_id",
+    "host",
+    "timestamp",
     "frequency_score",
     "burstiness_score",
     "zscore_base",
     "time_delta_prev",
     "time_delta_session_start",
     "inter_arrival_rate",
-    "severity_weight",
+    "event_weight",
     "counter_proximity",
 ]
 
@@ -185,7 +198,53 @@ TRAINING_WINDOW_SESSIONS: int = 10
 # Periodic retraining trigger: retrain every K new log rows ingested.
 # Lower K = fresher model but more compute. Start high, tune down if needed.
 RETRAIN_EVERY_K_LOGS: int = 500
- 
+
+# ---------------------------------------------------------------------------
+# Phase 3 — IsolationForest hyperparameters (P3: Shreeraksha M)
+# ---------------------------------------------------------------------------
+
+# "auto" lets sklearn set contamination to 1/n_estimators; avoids overfitting
+# the anomaly fraction assumption on small real-data batches.
+IF_CONTAMINATION: str = "auto"
+
+IF_N_ESTIMATORS: int = 100
+IF_RANDOM_STATE: int = 42
+
+# Feature columns fed into IsolationForest.
+# Identifiers (sequence_number, session_id, host, template_id, timestamp) and
+# rule-based signals (event_weight) are excluded — they are not learned features.
+IF_FEATURE_COLUMNS: list = [
+    "frequency_score",
+    "burstiness_score",
+    "zscore_base",
+    "time_delta_prev",
+    "time_delta_session_start",
+    "inter_arrival_rate",
+    "counter_proximity",
+]
+
+# Hybrid score weights (IF weighted higher — it captures multi-feature interactions
+# that the per-column zscore_base signal misses).
+IF_ISOLATION_WEIGHT: float = 0.7
+IF_ZSCORE_WEIGHT: float = 0.3
+
+# Model confidence scales linearly 0.0 → 1.0 as training samples grow.
+# Below this threshold the blend leans on zscore_base; at or above it the full
+# hybrid score is used.
+COLD_START_FULL_CONFIDENCE_THRESHOLD: int = 500
+
+# Combined score above this value → is_anomaly = True.
+ANOMALY_SCORE_THRESHOLD: float = 0.5
+
+# Sliding window: retrain on the last N sessions only.
+RETRAINING_SESSION_WINDOW: int = 50
+
+# Periodic trigger: retrain every K new log rows ingested.
+RETRAINING_TRIGGER_EVERY_K: int = 1000
+
+# Directory where versioned model pkl files and JSON sidecars are stored.
+MODEL_STORE_PATH: str = "ml/model_store"
+
 # ---------------------------------------------------------------------------
 # Phase 4 — Importance Scoring (P4: Ujwal Hegde)
 # ---------------------------------------------------------------------------

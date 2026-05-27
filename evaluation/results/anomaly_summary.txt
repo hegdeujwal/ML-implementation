@@ -1,22 +1,26 @@
+============================================================
+Phase 3 — Anomaly Detection Evaluation Summary
+============================================================
 
-ShreeRaksha  Phase 2 Anomaly Detection Evaluation
+Distribution metrics:
+  anomaly_rate          : 0.5300 (53.0%)
+  mean_combined_score   : 0.5131
+  model_confidence      : 1.0000
 
-Samples evaluated : 300
-Anomaly rate      : 0.1100 (11.0%)
+Score distribution (combined_score):
+  min   : 0.0058
+  25%   : 0.2624
+  50%   : 0.5139
+  75%   : 0.7793
+  max   : 0.9807
+  mean  : 0.5131
+  std   : 0.2885
 
-Classification metrics:
-  Precision        : 0.9091
-  Recall           : 1.0000
-  F1 Score         : 0.9524
+Top 10 templates by mean combined_score:
+   1. PORT_DOWN
+   2. LOGIN
+   3. ROUTE
+   4. HEALTH
 
-Confusion breakdown:
-  True Positives   : 30
-  False Positives  : 3
-  False Negatives  : 0
-
-Top 10 most anomalous log templates:
-   1. PORT_SCAN
-   2. NORMAL
-   3. CPU_HIGH
-   4. IF_DOWN
-   5. LOGIN_FAIL
+Classification metrics: not available (no ground truth in data/synthetic/)
+============================================================

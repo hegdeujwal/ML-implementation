@@ -131,6 +131,10 @@ def run() -> None:
     t0 = time.perf_counter()
 
     raw_df = pd.read_parquet(SESSIONIZED_LOGS_PATH)
+    # sequence_engine expects float epoch seconds; normalise datetime if needed
+    if pd.api.types.is_datetime64_any_dtype(raw_df["timestamp"]):
+        raw_df = raw_df.copy()
+        raw_df["timestamp"] = raw_df["timestamp"].astype("int64") / 1e9
     in_sequence_log_ids = detect_sequences(raw_df, output_path=SEQUENCES_JSON_PATH)
 
     with open(SEQUENCES_JSON_PATH, "r") as fh:

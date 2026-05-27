@@ -1,55 +1,64 @@
 """
 Temporal feature extraction for sessionized logs.
 
-Calculates:
-- time since previous log
-- time since session start
-- inter-arrival rate trends
-
-Used to capture timing-based anomaly patterns.
+All three functions are per-session — call them via groupby("session_id").apply()
+from feature_pipeline.py.  Each sorts by timestamp internally and returns a Series
+aligned to the original session_df.index (original index labels are preserved through
+the sort, so no explicit re-indexing is required).
 """
 
+from __future__ import annotations
 
-
-
-import numpy as np
 import pandas as pd
 
-from common.config import INTER_ARRIVAL_EMA_SPAN
+from common.config import IAR_EMA_ALPHA
 
 
-def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+def time_delta_prev(session_df: pd.DataFrame) -> pd.Series:
+    """Seconds since the previous log in the session, sorted by timestamp.
 
-    df = df.dropna(subset=["timestamp"])
+    First log in the session → 0.0.  Handles out-of-order input by sorting
+    internally without modifying the caller's DataFrame.
+    """
+    sorted_df = session_df.sort_values("timestamp")
+    return (
+        sorted_df["timestamp"]
+        .diff()
+        .dt.total_seconds()
+        .fillna(0.0)
+        .astype(float)
+    )
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    df = df.sort_values(["session_id", "timestamp"])
+def time_delta_session_start(session_df: pd.DataFrame) -> pd.Series:
+    """Seconds from the first log in the session to each log.
 
-    df["time_delta_prev"] = (
-        df.groupby("session_id")["timestamp"]
+    First log → 0.0.  Handles out-of-order input by sorting internally.
+    """
+    sorted_df = session_df.sort_values("timestamp")
+    first_ts = sorted_df["timestamp"].iloc[0]
+    return (sorted_df["timestamp"] - first_ts).dt.total_seconds().astype(float)
+
+
+def inter_arrival_rate(session_df: pd.DataFrame) -> pd.Series:
+    """EMA of inter-arrival times within the session (alpha from config IAR_EMA_ALPHA).
+
+    First log → 0.0 (no previous arrival).  Single-log sessions → 0.0 for all rows.
+    Handles out-of-order input by sorting internally.
+    """
+    if len(session_df) < 2:
+        return pd.Series(0.0, index=session_df.index, dtype=float)
+
+    sorted_df = session_df.sort_values("timestamp")
+    diffs = (
+        sorted_df["timestamp"]
         .diff()
         .dt.total_seconds()
         .fillna(0.0)
     )
-
-    session_start = (
-        df.groupby("session_id")["timestamp"]
-        .transform("min")
+    return (
+        diffs
+        .ewm(alpha=IAR_EMA_ALPHA, adjust=False)
+        .mean()
+        .astype(float)
     )
-
-    df["time_delta_session_start"] = (
-        df["timestamp"] - session_start
-    ).dt.total_seconds()
-
-    df["inter_arrival_rate"] = (
-        df.groupby("session_id")["time_delta_prev"]
-        .transform(
-            lambda x: x.ewm(
-                span=INTER_ARRIVAL_EMA_SPAN,
-                adjust=False
-            ).mean()
-        )
-    )
-
-    return df
