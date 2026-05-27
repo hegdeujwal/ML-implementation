@@ -1,7 +1,7 @@
 """
 correlation/graph_visualizer.py
 
-Export the correlation graph as a JSON document for downstream visualization.
+Export the correlation graph as JSON for downstream visualization.
 
 Output format (correlation_graph.json)
 ---------------------------------------
@@ -9,9 +9,9 @@ Output format (correlation_graph.json)
   "nodes": [
     {
       "id": "IF_DOWN",
-      "template": "IF_DOWN",
-      "node_type": "log_template",
-      "centrality_score": 0.723
+      "cluster_id": "C0001",
+      "degree": 5,
+      "centrality_score": 0.42
     },
     ...
   ],
@@ -19,88 +19,104 @@ Output format (correlation_graph.json)
     {
       "source": "IF_DOWN",
       "target": "BGP_PEER_RESET",
-      "weight": 0.85
+      "weight": 0.15,
+      "pmi": 0.83,
+      "cooccurrence_count": 12
     },
     ...
-  ]
+  ],
+  "metadata": {
+    "n_nodes": int,
+    "n_edges": int,
+    "n_components": int,
+    "max_nodes_cap": GRAPH_MAX_NODES,
+    "cooccurrence_window_seconds": GRAPH_COOCCURRENCE_WINDOW_SECONDS
+  }
 }
-
-PNG export is out of scope for Phase 3 (requires matplotlib + layout engine
-which adds significant dependency weight).  The JSON export is the primary
-deliverable; a separate visualization layer can consume it.
 
 Public API
 ----------
-export_graph_json(g, centrality_df, output_path)
-    Write the JSON file and return the dict that was written.
+export_graph_json(graph, output_path) -> str
+export_graph_png(graph, output_path)  -> None  (stub — not yet implemented)
 """
 
 from __future__ import annotations
 
 import json
-import os
-from typing import Optional
+from pathlib import Path
 
-import pandas as pd
+import networkx as nx
 
 import common.config as cfg
-from correlation.graph_builder import CorrelationGraph
+from common.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def export_graph_json(
-    g: CorrelationGraph,
-    centrality_df: pd.DataFrame,
-    output_path: Optional[str] = None,
-) -> dict:
+    graph: nx.Graph,
+    output_path: str = "data/processed/correlation_graph.json",
+) -> str:
     """Export the correlation graph as JSON.
 
     Parameters
     ----------
-    g : CorrelationGraph
-        The built correlation graph.
-    centrality_df : pd.DataFrame
-        Output of centrality.compute_centrality().  Provides centrality_score
-        per node.  Must have columns: node_id, centrality_score.
-    output_path : str, optional
-        Destination file path.  Defaults to cfg.GRAPH_JSON_PATH.
+    graph : nx.Graph
+        Output of graph_builder.build_graph() or load_or_build_graph().
+        Node attributes used: cluster_id, centrality_score (optional).
+        Edge attributes used: weight, pmi, cooccurrence_count.
+    output_path : str
+        Destination file path.
 
     Returns
     -------
-    dict
-        The dict that was serialized to JSON (nodes + edges lists).
+    str
+        The path the file was written to.
     """
-    if output_path is None:
-        output_path = cfg.GRAPH_JSON_PATH
-
-    # Build a fast lookup: node_id -> centrality_score
-    score_lookup: dict[str, float] = {}
-    if not centrality_df.empty:
-        score_lookup = (
-            centrality_df.set_index("node_id")["centrality_score"]
-            .to_dict()
-        )
-
-    nodes_list: list[dict] = []
-    for node_id, node in g.nodes.items():
+    nodes_list = []
+    for node_id in graph.nodes:
+        attrs = graph.nodes[node_id]
         nodes_list.append({
             "id": node_id,
-            "template": node_id,
-            "node_type": node.node_type,
-            "centrality_score": round(score_lookup.get(node_id, 0.0), 6),
+            "cluster_id": attrs.get("cluster_id", ""),
+            "degree": graph.degree[node_id],
+            "centrality_score": round(float(attrs.get("centrality_score", 0.0)), 6),
         })
 
-    edges_list: list[dict] = []
-    for (src, tgt), edge in g.edges.items():
+    edges_list = []
+    for u, v, attrs in graph.edges(data=True):
         edges_list.append({
-            "source": src,
-            "target": tgt,
-            "weight": round(edge.weight, 6),
+            "source": u,
+            "target": v,
+            "weight": round(float(attrs.get("weight", 0.0)), 6),
+            "pmi": round(float(attrs.get("pmi", 0.0)), 6),
+            "cooccurrence_count": int(attrs.get("cooccurrence_count", 0)),
         })
 
-    payload = {"nodes": nodes_list, "edges": edges_list}
+    n_components = nx.number_connected_components(graph)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
+    payload = {
+        "nodes": nodes_list,
+        "edges": edges_list,
+        "metadata": {
+            "n_nodes": graph.number_of_nodes(),
+            "n_edges": graph.number_of_edges(),
+            "n_components": n_components,
+            "max_nodes_cap": cfg.GRAPH_MAX_NODES,
+            "cooccurrence_window_seconds": cfg.GRAPH_COOCCURRENCE_WINDOW_SECONDS,
+        },
+    }
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 
-    return payload
+    logger.info("Graph exported to %s", output_path)
+    return output_path
+
+
+def export_graph_png(graph: nx.Graph, output_path: str) -> None:
+    # TODO: implement matplotlib/graphviz PNG export for demo day
+    logger.info("PNG export not yet implemented — skipped")
+    return None

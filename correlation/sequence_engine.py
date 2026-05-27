@@ -57,17 +57,17 @@ def _extract_session_sequences(
     session_df: pd.DataFrame,
     window_seconds: int,
     min_length: int,
-) -> dict[tuple, list[str]]:
-    """Return mapping of sequence_tuple -> [log_id, ...] for one session.
+) -> dict[tuple, list]:
+    """Return mapping of sequence_tuple -> [sequence_number, ...] for one session.
 
-    Only log_ids that are part of a detected candidate sequence are included.
-    A candidate must fit within window_seconds end-to-end.
+    Only sequence_numbers that are part of a detected candidate sequence are
+    included. A candidate must fit within window_seconds end-to-end.
 
     Parameters
     ----------
     session_df : pd.DataFrame
-        Single-session slice, sorted by timestamp.  Columns: log_id, timestamp,
-        template_id.
+        Single-session slice, sorted by timestamp.  Columns: sequence_number,
+        timestamp, template_id.
     window_seconds : int
         Maximum elapsed time between first and last event in a sequence.
     min_length : int
@@ -75,16 +75,16 @@ def _extract_session_sequences(
 
     Returns
     -------
-    dict mapping sequence tuple -> list of contributing log_ids
+    dict mapping sequence tuple -> list of contributing sequence_numbers
     """
-    rows = session_df[["log_id", "timestamp", "template_id"]].values.tolist()
+    rows = session_df[["sequence_number", "timestamp", "template_id"]].values.tolist()
     n = len(rows)
-    found: dict[tuple, list[str]] = {}
+    found: dict[tuple, list] = {}
 
     # Sliding window: for each start index, grow right while within window
     for i in range(n):
         seq_templates: list[str] = [rows[i][2]]
-        seq_log_ids: list[str] = [rows[i][0]]
+        seq_ids: list = [rows[i][0]]
         ts_start: float = rows[i][1]
 
         for j in range(i + 1, n):
@@ -92,12 +92,12 @@ def _extract_session_sequences(
             if ts_j - ts_start > window_seconds:
                 break
             seq_templates.append(rows[j][2])
-            seq_log_ids.append(rows[j][0])
+            seq_ids.append(rows[j][0])
 
             if len(seq_templates) >= min_length:
                 key = tuple(seq_templates[:min_length])
                 if key not in found:
-                    found[key] = list(seq_log_ids[:min_length])
+                    found[key] = list(seq_ids[:min_length])
 
     return found
 
@@ -119,7 +119,7 @@ def detect_sequences(
     ----------
     df : pd.DataFrame
         Sessionized log DataFrame.  Required columns:
-        log_id, session_id, timestamp, template_id.
+        sequence_number, session_id, timestamp, template_id.
     window_seconds : int, optional
         Time window within which consecutive templates must occur.
         Defaults to cfg.SEQUENCE_WINDOW_SECONDS (30 s).
@@ -127,16 +127,18 @@ def detect_sequences(
         Minimum sequence length.  Defaults to cfg.SEQUENCE_MIN_LENGTH (3).
     min_support : int, optional
         Minimum number of distinct sessions exhibiting the sequence.
-        Defaults to cfg.SEQUENCE_MIN_SUPPORT (3).
+        Defaults to cfg.SEQUENCE_MIN_SUPPORT (5).
     output_path : str, optional
         Path to write sequences.json.
         Defaults to cfg.SEQUENCES_JSON_PATH.
 
     Returns
     -------
-    set of str
-        log_ids that are part of at least one retained sequence.
-        Used by centrality.build_graph_scores_df to populate in_sequence.
+    set of int
+        sequence_numbers that are part of at least one retained sequence.
+        Caller updates graph_scores_df["in_sequence"] via:
+            graph_scores_df["in_sequence"] = (
+                graph_scores_df["sequence_number"].isin(sequence_number_set))
     """
     if window_seconds is None:
         window_seconds = cfg.SEQUENCE_WINDOW_SECONDS
@@ -147,7 +149,7 @@ def detect_sequences(
     if output_path is None:
         output_path = cfg.SEQUENCES_JSON_PATH
 
-    required_cols = {"log_id", "session_id", "timestamp", "template_id"}
+    required_cols = {"sequence_number", "session_id", "timestamp", "template_id"}
     missing = required_cols - set(df.columns)
     if missing:
         raise ValueError(f"detect_sequences: missing columns: {missing}")
@@ -160,25 +162,25 @@ def detect_sequences(
 
     df = df.sort_values(["session_id", "timestamp"]).reset_index(drop=True)
 
-    # sequence_tuple -> {session_id -> [log_ids in that session]}
-    sequence_sessions: dict[tuple, dict[str, list[str]]] = defaultdict(dict)
+    # sequence_tuple -> {session_id -> [sequence_numbers in that session]}
+    sequence_sessions: dict[tuple, dict[str, list]] = defaultdict(dict)
 
     for session_id, session_df in df.groupby("session_id"):
         session_seqs = _extract_session_sequences(
             session_df, window_seconds, min_length
         )
-        for seq_key, log_ids in session_seqs.items():
-            sequence_sessions[seq_key][str(session_id)] = log_ids
+        for seq_key, seq_nums in session_seqs.items():
+            sequence_sessions[seq_key][str(session_id)] = seq_nums
 
     # Filter by min_support
     retained: list[dict] = []
-    in_sequence_log_ids: set[str] = set()
+    in_sequence_ids: set = set()
 
     for seq_key, sessions_map in sequence_sessions.items():
         support = len(sessions_map)
         if support >= min_support:
-            all_log_ids = [lid for lids in sessions_map.values() for lid in lids]
-            in_sequence_log_ids.update(all_log_ids)
+            all_ids = [sid for sids in sessions_map.values() for sid in sids]
+            in_sequence_ids.update(all_ids)
             retained.append({
                 "sequence": list(seq_key),
                 "support_count": support,
@@ -193,4 +195,4 @@ def detect_sequences(
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(retained, fh, indent=2)
 
-    return in_sequence_log_ids
+    return in_sequence_ids

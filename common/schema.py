@@ -85,30 +85,52 @@ class AnomalyRow:
 
 @dataclass
 class GraphScoreRow:
-    """One row of graph_scores_df.parquet (P4 output).
+    """One row of graph_scores_df.parquet (P3 output).
 
-    centrality_score (PageRank) is the primary signal consumed by scoring.
-    correlation_id groups logs into incident clusters; NULL for unclustered logs.
+    # cluster_id  (P3) = graph connected component — structural relationship
+    # correlation_id (P4) = DBSCAN incident cluster — anomaly grouping
+    # P4 uses cluster_id as one input to assign correlation_id
     """
     sequence_number: int
-    centrality_score: float  # PageRank [0, 1] — primary signal for scoring
-    degree: int              # edge count in co-occurrence graph
-    betweenness: float       # normalised betweenness centrality [0, 1]
-    correlation_id: Optional[str]  # incident cluster label; NULL if unclustered
-    in_sequence: bool        # True if part of a detected recurring sequence
+    centrality_score: float       # PageRank normalised [0, 1] — primary signal for scoring
+    degree: int                   # node degree in co-occurrence graph
+    betweenness: float            # betweenness centrality normalised [0, 1]
+    in_graph: bool                # True if template made it past GRAPH_MAX_NODES cap
+    cluster_id: str               # connected component ID e.g. "C0000"; "UNCAPPED" if outside graph
+    in_sequence: bool             # True if part of a detected recurring sequence
+    correlated_log_ids: list      # sequence_numbers of co-occurring logs (as strings) for parquet compat
 
 
 @dataclass
 class ScoredLogRow:
-    """One row of scored_logs_df.parquet (P5 output).
+    """One row of scored_logs_df.parquet (P4 output).
 
-    importance_score = SCORING_WEIGHT_ML * combined_score
-                     + SCORING_WEIGHT_GRAPH * centrality_score
-                     + SCORING_WEIGHT_RULE * event_weight
+    final_score = SCORING_ML_WEIGHT * combined_score
+                + SCORING_GRAPH_WEIGHT * centrality_score
     Clipped to [0.0, 1.0] before saving.
+
+    correlation_id is the DBSCAN incident cluster ID assigned in P4
+    (incident_clusterer.py). It is distinct from cluster_id (P3), which
+    is the graph connected-component label used as input to DBSCAN.
     """
     sequence_number: int
-    importance_score: float  # [0.0, 1.0]
-    label: str               # ignore | low | medium | critical
-    correlation_id: Optional[str]   # propagated from GraphScoreRow
+    final_score: float             # [0.0, 1.0]
+    label: str                     # ignore | low | medium | critical
+    correlation_id: Optional[str]  # DBSCAN incident cluster ID; None = noise
     is_root_cause: bool
+    root_cause_confidence: float   # [0.0, 1.0]; 0.0 for non-root-cause rows
+    is_cross_system: bool          # True if incident spans multiple cluster_ids
+
+
+@dataclass
+class RootCauseRow:
+    """One row of root_causes_df.parquet (P4 output).
+
+    One row per root cause candidate across all incidents.
+    root_cause_log_id is the sequence_number of the candidate log.
+    in_graph reflects whether the candidate was an in-graph node in P3.
+    """
+    incident_id: str
+    root_cause_log_id: int    # sequence_number of the candidate
+    confidence_score: float   # [0.0, 1.0]
+    in_graph: bool

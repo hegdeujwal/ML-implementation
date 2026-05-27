@@ -1,152 +1,171 @@
 """
-root_cause_engine.py
-====================
+scoring/root_cause_engine.py
 
-Identifies likely root-cause logs within each incident cluster.
+Identify root cause candidates within each incident cluster and save
+the final scored_logs_df.parquet.
+
+Public API
+----------
+identify_root_causes(scored_df) -> tuple[pd.DataFrame, pd.DataFrame]
+    Returns (updated_scored_df, root_causes_df).
+    Saves scored_logs_df.parquet and root_causes_df.parquet as side effects.
+
+run() -> tuple[pd.DataFrame, pd.DataFrame]
+    Thin wrapper: loads scored_logs_df.parquet and calls identify_root_causes().
 """
 
-from pathlib import Path
+from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
+import common.config as cfg
 from common.logger import get_logger
+from common.utils import load_parquet, save_parquet
 
 logger = get_logger(__name__)
 
-DATA_DIR = Path("data/processed")
+_SCORED_PATH = "data/processed/scored_logs_df.parquet"
+_ROOT_CAUSES_PATH = "data/processed/root_causes_df.parquet"
 
-SCORED_PATH = DATA_DIR / "scored_logs_df.parquet"
-
-ROOT_CAUSE_OUTPUT = DATA_DIR / "root_causes_df.parquet"
-
-OUTPUT_COLUMNS = [
-    "log_id",
+_SCORED_LOG_COLS = [
+    "sequence_number",
     "final_score",
     "label",
-    "incident_id",
+    "correlation_id",
     "is_root_cause",
     "root_cause_confidence",
+    "is_cross_system",
 ]
 
-def run():
 
-    logger.info("Loading clustered scored logs...")
+def identify_root_causes(
+    scored_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Identify root cause candidates and save final output parquets.
 
-    df = pd.read_parquet(SCORED_PATH)
+    Parameters
+    ----------
+    scored_df : pd.DataFrame
+        Output of cluster_incidents(). Must contain: correlation_id,
+        in_graph, centrality_score, sequence_number, cluster_id,
+        is_cross_system, final_score, label.
 
-    # ---------------------------------------------------------------
-    # Default values
-    # ---------------------------------------------------------------
+    Returns
+    -------
+    (updated_scored_df, root_causes_df)
+        updated_scored_df : full df with is_root_cause and
+            root_cause_confidence columns added.
+        root_causes_df : one row per root cause candidate.
+    """
+    df = scored_df.copy()
 
+    # Step 1 — initialise output columns
     df["is_root_cause"] = False
-
     df["root_cause_confidence"] = 0.0
 
-    root_cause_rows = []
+    root_cause_rows: list[dict] = []
 
-    # ---------------------------------------------------------------
-    # Process each incident
-    # ---------------------------------------------------------------
-
-    valid_incidents = (
-        df["incident_id"]
-        .dropna()
-        .unique()
-    )
-
-    logger.info(
-        f"Processing {len(valid_incidents)} incidents..."
-    )
+    # Step 2 — process each incident
+    valid_incidents = df["correlation_id"].dropna().unique()
+    logger.info("Processing %d incidents for root cause identification", len(valid_incidents))
 
     for incident_id in valid_incidents:
+        cluster_rows = df[df["correlation_id"] == incident_id]
 
-        cluster_df = df[
-            df["incident_id"] == incident_id
-        ].copy()
-
-        # -----------------------------------------------------------
-        # Rank by centrality_score descending
-        # -----------------------------------------------------------
-
-        cluster_df = cluster_df.sort_values(
-            by="centrality_score",
-            ascending=False,
-        )
-
-        max_centrality = (
-            cluster_df["centrality_score"].max()
-        )
-
-        # Prevent divide-by-zero
-        if max_centrality == 0:
-            max_centrality = 1.0
-
-        # -----------------------------------------------------------
-        # Top 3 logs become root-cause candidates
-        # -----------------------------------------------------------
-
-        top_candidates = cluster_df.head(3)
-
-        for _, row in top_candidates.iterrows():
-
-            confidence = (
-                row["centrality_score"]
-                / max_centrality
+        # Candidate selection: prefer in_graph=True logs
+        in_graph_rows = cluster_rows[cluster_rows["in_graph"] == True]
+        if len(in_graph_rows) > 0:
+            candidates = in_graph_rows
+        else:
+            candidates = cluster_rows
+            logger.warning(
+                "Incident %s: no in-graph logs found, falling back to all %d "
+                "logs for root cause selection",
+                incident_id, len(cluster_rows),
             )
 
-            # Update scored dataframe
-            df.loc[
-                df["log_id"] == row["log_id"],
-                "is_root_cause"
-            ] = True
+        # Ranking: centrality descending, capped at ROOT_CAUSE_TOP_N
+        candidates_sorted = candidates.sort_values("centrality_score", ascending=False)
+        top_candidates = candidates_sorted.head(cfg.ROOT_CAUSE_TOP_N)
 
-            df.loc[
-                df["log_id"] == row["log_id"],
-                "root_cause_confidence"
-            ] = confidence
+        # Confidence
+        max_centrality = float(candidates["centrality_score"].max())
+        if max_centrality == 0.0:
+            confidence_per_candidate = 1.0 / len(candidates)
+            logger.warning(
+                "Incident %s: max_centrality=0.0, distributing equal confidence "
+                "(%.4f) across %d candidates",
+                incident_id, confidence_per_candidate, len(candidates),
+            )
+            confidences = {idx: confidence_per_candidate for idx in top_candidates.index}
+        else:
+            confidences = {
+                idx: float(row["centrality_score"]) / max_centrality
+                for idx, row in top_candidates.iterrows()
+            }
 
+        # Mark is_root_cause and root_cause_confidence in df
+        df.loc[top_candidates.index, "is_root_cause"] = True
+        df.loc[top_candidates.index, "root_cause_confidence"] = [
+            confidences[idx] for idx in top_candidates.index
+        ]
+
+        # Collect root_causes_df rows
+        for idx, row in top_candidates.iterrows():
             root_cause_rows.append({
                 "incident_id": incident_id,
-                "root_cause_log_id": row["log_id"],
-                "confidence_score": confidence,
+                "root_cause_log_id": int(row["sequence_number"]),
+                "confidence_score": confidences[idx],
+                "in_graph": bool(row["in_graph"]),
             })
 
-    # ---------------------------------------------------------------
-    # Save scored logs
-    # ---------------------------------------------------------------
+    # Step 3 — assemble and save root_causes_df
+    if root_cause_rows:
+        root_causes_df = pd.DataFrame(root_cause_rows)
+    else:
+        root_causes_df = pd.DataFrame(
+            columns=["incident_id", "root_cause_log_id", "confidence_score", "in_graph"]
+        )
+    save_parquet(root_causes_df, _ROOT_CAUSES_PATH)
 
-    final_output_df = df[OUTPUT_COLUMNS]
+    # Step 4 — assemble and save scored_logs_df
+    # Drop temporal_proximity and all other processing-only columns
+    scored_logs_df = df[[c for c in _SCORED_LOG_COLS if c in df.columns]].copy()
 
-    final_output_df.to_parquet(
-        SCORED_PATH,
-        index=False,
+    # Validate
+    for col in ("sequence_number", "final_score", "label"):
+        if scored_logs_df[col].isna().any():
+            raise ValueError(f"Column '{col}' has NaN values in scored_logs_df")
+    for col in ("final_score", "root_cause_confidence"):
+        if not np.isfinite(scored_logs_df[col].to_numpy()).all():
+            raise ValueError(f"Column '{col}' has inf or NaN values in scored_logs_df")
+
+    save_parquet(scored_logs_df, _SCORED_PATH)
+
+    n_incidents = len(valid_incidents)
+    n_cross = (
+        int(
+            df[df["correlation_id"].notna()]
+            .groupby("correlation_id")["is_cross_system"]
+            .first()
+            .sum()
+        )
+        if n_incidents > 0 else 0
     )
-    # ---------------------------------------------------------------
-    # Save root cause summary
-    # ---------------------------------------------------------------
-
-    root_causes_df = pd.DataFrame(
-        root_cause_rows
+    n_root = int(scored_logs_df["is_root_cause"].sum())
+    label_dist = scored_logs_df["label"].value_counts().to_dict()
+    print(
+        f"scored_logs_df: shape={scored_logs_df.shape}, labels={label_dist}, "
+        f"incidents={n_incidents}, cross_system_incidents={n_cross}, "
+        f"root_cause_candidates={n_root}"
     )
 
-    root_causes_df.to_parquet(
-        ROOT_CAUSE_OUTPUT,
-        index=False,
-    )
-
-    logger.info(
-        f"Root causes identified:"
-        f" {len(root_causes_df)}"
-    )
-
-    logger.info(
-        f"Saved root causes to:"
-        f" {ROOT_CAUSE_OUTPUT}"
-    )
-
+    # Step 5 — return
     return df, root_causes_df
 
 
-if __name__ == "__main__":
-
-    run()
+def run() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Thin wrapper: load scored_logs_df.parquet and call identify_root_causes()."""
+    df = load_parquet(_SCORED_PATH)
+    return identify_root_causes(df)

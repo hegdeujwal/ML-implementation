@@ -13,22 +13,27 @@ LOG_LEVEL: str = "INFO"
 # Correlation / Graph parameters
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Graph construction — canonical names
+# ---------------------------------------------------------------------------
+
 # Time window (seconds) within which two log events are considered co-occurring.
 # Widening this produces a denser graph; narrowing it produces a sparser one.
-CORRELATION_TIME_WINDOW_SECONDS: int = 60
+GRAPH_COOCCURRENCE_WINDOW_SECONDS: int = 60
 
-# Hard cap on the number of template nodes admitted into the correlation graph.
-# Only the MAX_GRAPH_NODES most-frequent templates are kept; the rest are
-# silently dropped before edge construction begins.  Raising this limit
-# increases memory and CPU cost roughly as O(N^2) in the worst case because
-# the sliding-window join visits every pair of events that fall inside the
-# same time window.  500 is a safe default for a single-host deployment;
-# reduce to ~100 for memory-constrained environments or increase carefully
-# after profiling.
-MAX_GRAPH_NODES: int = 500
+# Hard cap on unique templates admitted into the co-occurrence graph.
+# Only the top-N most-frequent templates are kept; the rest are excluded
+# before edge construction.  500 is a safe default for a single-host
+# deployment; reduce to ~100 for memory-constrained environments.
+GRAPH_MAX_NODES: int = 500
 
 # PageRank damping factor (standard value; literature range 0.8–0.9).
-PAGERANK_ALPHA: float = 0.85
+GRAPH_PAGERANK_ALPHA: float = 0.85
+
+# Backward-compatible aliases — kept so existing imports don't break.
+CORRELATION_TIME_WINDOW_SECONDS: int = GRAPH_COOCCURRENCE_WINDOW_SECONDS
+MAX_GRAPH_NODES: int = GRAPH_MAX_NODES
+PAGERANK_ALPHA: float = GRAPH_PAGERANK_ALPHA
 
 # Betweenness centrality approximation: number of pivot nodes sampled.
 # Full exact computation is O(V*E) which is impractical for graphs > 200 nodes.
@@ -42,7 +47,7 @@ SEQUENCE_WINDOW_SECONDS: int = 30
 # A sequence must contain at least this many log templates.
 SEQUENCE_MIN_LENGTH: int = 3
 # A sequence must appear in at least this many distinct sessions.
-SEQUENCE_MIN_SUPPORT: int = 3
+SEQUENCE_MIN_SUPPORT: int = 5
 
 # ---------------------------------------------------------------------------
 # Phase 3 output paths
@@ -248,18 +253,28 @@ MODEL_STORE_PATH: str = "ml/model_store"
 # ---------------------------------------------------------------------------
 # Phase 4 — Importance Scoring (P4: Ujwal Hegde)
 # ---------------------------------------------------------------------------
- 
-# Weights for the final importance score (ML + graph + rule-based signals)
-SCORING_WEIGHT_ML: float = 0.40
-SCORING_WEIGHT_GRAPH: float = 0.35
-SCORING_WEIGHT_RULE: float = 0.25
- 
+
+# Weights for the final importance score — 2-term formula.
+# event_weight flows through the ML model indirectly via combined_score.
+# Weights sum to 1.0.
+SCORING_ML_WEIGHT: float = 0.65
+SCORING_GRAPH_WEIGHT: float = 0.35
+
 # Label thresholds: ignore / low / medium / critical
 LABEL_IGNORE_MAX: float = 0.2
 LABEL_LOW_MAX: float = 0.5
 LABEL_MEDIUM_MAX: float = 0.75
 # Anything above LABEL_MEDIUM_MAX → critical
- 
+
 # DBSCAN clustering parameters (incident_clusterer.py)
 DBSCAN_EPS: float = 0.3
 DBSCAN_MIN_SAMPLES: int = 5
+
+# Root cause candidates selected per incident cluster.
+ROOT_CAUSE_TOP_N: int = 3
+
+# Missing upstream input fill strategy.
+# Rows absent from anomaly_df or graph_scores_df after the left join are
+# filled with the column mean of the non-null rows. Boolean columns
+# (is_anomaly, in_graph, in_sequence) are always filled with False.
+MISSING_INPUT_FILL: str = "mean"

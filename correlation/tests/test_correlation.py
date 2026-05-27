@@ -1,461 +1,371 @@
 """
 correlation/tests/test_correlation.py
 
-Unit tests for the full correlation pipeline:
-    Phase 1 (retained): graph_builder.py -- 5-node synthetic scenario
-    Phase 3 (new):      centrality.py, sequence_engine.py, graph_visualizer.py,
-                        and the assembled graph_scores_df output contract.
+Unit tests for the correlation pipeline (P3):
+  graph_builder.py, centrality.py, sequence_engine.py, graph_visualizer.py
+
+All synthetic DataFrames use sequence_number (not log_id) as the universal
+join key and include: session_id, template_id, timestamp, host, frequency.
 
 Running
 -------
 From the project root:
-    python -m pytest correlation/tests/test_correlation.py -v
-
-Synthetic scenario (Phase 1, unchanged)
-------------------------------------------
-Five unique log templates (T1..T5) and one anomaly event placed on a timeline
-so co-occurrence relationships are fully determined:
-
-    t=0   T1
-    t=10  T2, anomaly_label="anomaly:if_counter"
-    t=30  T3
-    t=50  T4   (within 60 s window of T1 through T3)
-    t=70  T5   (outside 60 s window of T1, within window of T2..T4)
-    t=75  T1   (second occurrence)
-
-Expected: 6 nodes, 15 edges.  T1-T3 and T1-T4 both appear twice (weight=1.0);
-all other edges have weight=0.5.
+    pytest correlation/tests/test_correlation.py -v
 """
 
+import dataclasses
 import json
-import math
 import os
+import re
 import sys
-import tempfile
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from correlation.centrality import build_graph_scores_df, compute_centrality
-from correlation.graph_builder import (
-    CorrelationGraph,
-    GraphEdge,
-    GraphNode,
-    LogEvent,
-    build_graph,
-    build_graph_from_parquet,
-    correlation_graph_to_nx,
-    load_graph,
-    persist_graph,
-)
-from correlation.graph_visualizer import export_graph_json
+import common.config as cfg
+from common.schema import GraphScoreRow
+from correlation.centrality import compute_centrality
+from correlation.graph_builder import build_graph, load_or_build_graph
+from correlation.graph_visualizer import export_graph_json, export_graph_png
 from correlation.sequence_engine import detect_sequences
 
 
 # ---------------------------------------------------------------------------
-# Shared fixtures
+# Helper: build_sessions_df
 # ---------------------------------------------------------------------------
 
-ANOMALY_LABEL = "anomaly:if_counter"
+def build_sessions_df(n_sessions: int, templates_per_session: int) -> pd.DataFrame:
+    """Generate synthetic sessionized_logs with deterministic template sequences.
 
-SYNTHETIC_EVENTS = [
-    LogEvent(timestamp=0,  template="T1"),
-    LogEvent(timestamp=10, template="T2", is_anomaly=True, anomaly_label=ANOMALY_LABEL),
-    LogEvent(timestamp=30, template="T3"),
-    LogEvent(timestamp=50, template="T4"),
-    LogEvent(timestamp=70, template="T5"),
-    LogEvent(timestamp=75, template="T1"),   # second occurrence of T1
-]
-
-EXPECTED_NODE_IDS = {"T1", "T2", "T3", "T4", "T5", ANOMALY_LABEL}
-EXPECTED_EDGE_COUNT = 15
-
-
-@pytest.fixture
-def graph() -> CorrelationGraph:
-    return build_graph(SYNTHETIC_EVENTS, time_window_seconds=60)
-
-
-@pytest.fixture
-def centrality_df(graph):
-    return compute_centrality(graph)
-
-
-@pytest.fixture
-def simple_log_df() -> pd.DataFrame:
-    """Minimal DataFrame matching sessionized_logs schema for score assembly tests."""
+    Templates are named T001..T{N}.
+    Timestamps within a session are 10 s apart.
+    Sessions are 10 minutes (600 s) apart.
+    """
     rows = []
-    for i, event in enumerate(SYNTHETIC_EVENTS):
-        rows.append({
-            "log_id": f"log_{i:03d}",
-            "session_id": "s_0",
-            "timestamp": event.timestamp,
-            "template_id": event.template,
-            "is_anomaly": event.is_anomaly,
-            "anomaly_label": event.anomaly_label or "",
-        })
-    return pd.DataFrame(rows)
-
-
-@pytest.fixture
-def sequence_log_df() -> pd.DataFrame:
-    """DataFrame with deliberate sequences across multiple sessions."""
-    rows = []
-    lid = [0]
-
-    def add(session, ts, template):
-        lid[0] += 1
-        rows.append({
-            "log_id": f"log_{lid[0]:04d}",
-            "session_id": session,
-            "timestamp": float(ts),
-            "template_id": template,
-            "is_anomaly": False,
-            "anomaly_label": "",
-        })
-
-    # Three sessions each containing the sequence A->B->C within 30 s
-    for s in range(5):
-        sid = f"session_{s:02d}"
-        base = s * 1000.0
-        add(sid, base + 0, "A")
-        add(sid, base + 5, "B")
-        add(sid, base + 10, "C")
-        # Extra noise events
-        add(sid, base + 50, "D")
-        add(sid, base + 60, "E")
-
+    seq_num = 0
+    base = pd.Timestamp("2026-01-01 00:00:00")
+    for s in range(n_sessions):
+        session_id = f"session_{s:03d}"
+        session_ts = base + pd.Timedelta(seconds=s * 600)
+        for t in range(templates_per_session):
+            template_id = f"T{t + 1:03d}"
+            ts = session_ts + pd.Timedelta(seconds=t * 10)
+            rows.append({
+                "sequence_number": seq_num,
+                "session_id": session_id,
+                "template_id": template_id,
+                "timestamp": ts,
+                "host": "host-01",
+                "frequency": 1,
+            })
+            seq_num += 1
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 tests (retained unchanged)
+# Autouse fixture: redirect all file outputs to tmp_path
 # ---------------------------------------------------------------------------
 
-class TestNodes:
-    def test_node_count(self, graph):
-        assert len(graph.nodes) == 6
-
-    def test_node_ids_present(self, graph):
-        assert set(graph.nodes.keys()) == EXPECTED_NODE_IDS
-
-    def test_node_types_log_template(self, graph):
-        for tid in ("T1", "T2", "T3", "T4", "T5"):
-            assert graph.nodes[tid].node_type == "log_template"
-
-    def test_anomaly_node_type(self, graph):
-        assert graph.nodes[ANOMALY_LABEL].node_type == "anomaly"
-
-    def test_node_counts(self, graph):
-        assert graph.nodes["T1"].count == 2
-        for tid in ("T2", "T3", "T4", "T5"):
-            assert graph.nodes[tid].count == 1
-        assert graph.nodes[ANOMALY_LABEL].count == 1
-
-    def test_node_schema(self, graph):
-        for node in graph.nodes.values():
-            assert isinstance(node, GraphNode)
-            assert hasattr(node, "id")
-            assert hasattr(node, "node_type")
-            assert hasattr(node, "count")
-            assert node.node_type in ("log_template", "anomaly")
-            assert node.count > 0
+@pytest.fixture(autouse=True)
+def patch_output_paths(monkeypatch, tmp_path):
+    """Keep tests isolated — redirect all disk writes to tmp_path."""
+    import correlation.graph_builder as gb
+    monkeypatch.setattr(gb, "_GRAPH_PICKLE_PATH", str(tmp_path / "graph.pkl"))
+    monkeypatch.setattr(cfg, "GRAPH_SCORES_PATH", str(tmp_path / "graph_scores.parquet"))
+    monkeypatch.setattr(cfg, "SEQUENCES_JSON_PATH", str(tmp_path / "sequences.json"))
 
 
-class TestEdges:
-    def test_edge_count(self, graph):
-        assert len(graph.edges) == EXPECTED_EDGE_COUNT
+# ---------------------------------------------------------------------------
+# TestGraphBuilder
+# ---------------------------------------------------------------------------
 
-    def test_edge_schema(self, graph):
-        for edge in graph.edges.values():
-            assert isinstance(edge, GraphEdge)
-            assert isinstance(edge.source, str)
-            assert isinstance(edge.target, str)
-            assert isinstance(edge.co_occurrences, int)
-            assert edge.co_occurrences >= 1
-            assert isinstance(edge.weight, float)
-            assert 0.0 < edge.weight <= 1.0
+class TestGraphBuilder:
+    def test_node_count(self):
+        """5 unique templates across 3 sessions → 5 nodes in graph."""
+        df = build_sessions_df(n_sessions=3, templates_per_session=5)
+        graph = build_graph(df)
+        assert graph.number_of_nodes() == 5
 
-    def test_max_weight_is_one(self, graph):
-        max_w = max(e.weight for e in graph.edges.values())
-        assert math.isclose(max_w, 1.0)
-
-    def test_weights_in_range(self, graph):
-        for edge in graph.edges.values():
-            assert 0.0 < edge.weight <= 1.0
-
-    def test_highest_weight_edges(self, graph):
-        def get_edge(a, b):
-            key = (a, b) if a <= b else (b, a)
-            assert key in graph.edges
-            return graph.edges[key]
-
-        e_t1_t3 = get_edge("T1", "T3")
-        e_t1_t4 = get_edge("T1", "T4")
-        assert e_t1_t3.co_occurrences == 2
-        assert e_t1_t4.co_occurrences == 2
-        assert math.isclose(e_t1_t3.weight, 1.0)
-        assert math.isclose(e_t1_t4.weight, 1.0)
-
-    def test_single_occurrence_edges_weight(self, graph):
-        for edge in graph.edges.values():
-            if edge.co_occurrences == 1:
-                assert math.isclose(edge.weight, 0.5, rel_tol=1e-5)
-
-    def test_anomaly_node_has_edges(self, graph):
-        anomaly_edges = [
-            e for e in graph.edges.values()
-            if e.source == ANOMALY_LABEL or e.target == ANOMALY_LABEL
+    def test_no_cross_session_edges(self):
+        """Templates from different sessions must not share edges even when
+        their timestamps overlap within the co-occurrence time window."""
+        base = pd.Timestamp("2026-01-01")
+        rows = [
+            # Session A: T001 at t=0s, T002 at t=10s
+            {"sequence_number": 0, "session_id": "sA", "template_id": "T001",
+             "timestamp": base, "host": "h", "frequency": 1},
+            {"sequence_number": 1, "session_id": "sA", "template_id": "T002",
+             "timestamp": base + pd.Timedelta(seconds=10), "host": "h", "frequency": 1},
+            # Session B: T003 at t=5s, T004 at t=15s — wall-clock overlaps sA
+            {"sequence_number": 2, "session_id": "sB", "template_id": "T003",
+             "timestamp": base + pd.Timedelta(seconds=5), "host": "h", "frequency": 1},
+            {"sequence_number": 3, "session_id": "sB", "template_id": "T004",
+             "timestamp": base + pd.Timedelta(seconds=15), "host": "h", "frequency": 1},
         ]
-        assert len(anomaly_edges) > 0
+        df = pd.DataFrame(rows)
+        graph = build_graph(df)
+        edge_pairs = {frozenset(e[:2]) for e in graph.edges}
+        for pair in [
+            frozenset({"T001", "T003"}), frozenset({"T001", "T004"}),
+            frozenset({"T002", "T003"}), frozenset({"T002", "T004"}),
+        ]:
+            assert pair not in edge_pairs, f"Cross-session edge found: {pair}"
 
-    def test_anomaly_connected_to_template_nodes(self, graph):
-        expected_neighbors = {"T1", "T2", "T3", "T4", "T5"}
-        actual_neighbors = set()
-        for (src, tgt), edge in graph.edges.items():
-            if src == ANOMALY_LABEL:
-                actual_neighbors.add(tgt)
-            elif tgt == ANOMALY_LABEL:
-                actual_neighbors.add(src)
-        assert expected_neighbors == actual_neighbors
+    def test_session_weight_in_range(self):
+        df = build_sessions_df(n_sessions=5, templates_per_session=3)
+        graph = build_graph(df)
+        for u, v, data in graph.edges(data=True):
+            assert 0.0 <= data["weight"] <= 1.0, f"weight out of range for {u}-{v}"
 
-    def test_no_self_loops(self, graph):
-        for src, tgt in graph.edges.keys():
-            assert src != tgt
+    def test_pmi_non_negative(self):
+        df = build_sessions_df(n_sessions=5, templates_per_session=3)
+        graph = build_graph(df)
+        for u, v, data in graph.edges(data=True):
+            assert data["pmi"] >= 0.0, f"pmi < 0 for edge {u}-{v}"
 
-    def test_canonical_key_order(self, graph):
-        for src, tgt in graph.edges.keys():
-            assert src <= tgt
+    def test_cluster_id_format_on_all_nodes(self):
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        graph = build_graph(df)
+        pattern = re.compile(r"^C\d{4}$")
+        for node in graph.nodes:
+            cid = graph.nodes[node].get("cluster_id", "")
+            assert pattern.match(cid), f"cluster_id {cid!r} does not match C{{n:04d}}"
 
+    def test_largest_component_is_c0000(self):
+        """The largest connected component must receive cluster_id 'C0000'.
 
-class TestGraphMetadata:
-    def test_time_window_stored(self, graph):
-        assert graph.time_window_seconds == 60
+        Large group: T001-T002-T003 (3-node component).
+        Small group: T004-T005      (2-node component).
+        3 > 2, so C0000 is deterministic for the large group.
+        """
+        base = pd.Timestamp("2026-01-01")
+        rows = []
+        seq = 0
+        # Large group: T001, T002, T003 co-occur within 60 s in 5 sessions
+        for s in range(5):
+            for i, tmpl in enumerate(["T001", "T002", "T003"]):
+                rows.append({
+                    "sequence_number": seq, "session_id": f"sA_{s}",
+                    "template_id": tmpl,
+                    "timestamp": base + pd.Timedelta(seconds=s * 600 + i * 10),
+                    "host": "h", "frequency": 1,
+                })
+                seq += 1
+        # Small group: T004, T005 co-occur in 2 sessions, time-separated from A
+        for s in range(2):
+            for i, tmpl in enumerate(["T004", "T005"]):
+                rows.append({
+                    "sequence_number": seq, "session_id": f"sB_{s}",
+                    "template_id": tmpl,
+                    "timestamp": base + pd.Timedelta(seconds=(100 + s) * 600 + i * 10),
+                    "host": "h", "frequency": 1,
+                })
+                seq += 1
+        df = pd.DataFrame(rows)
+        graph = build_graph(df)
+        # 3-node component → C0000
+        for tmpl in ("T001", "T002", "T003"):
+            assert graph.nodes[tmpl]["cluster_id"] == "C0000", tmpl
+        # 2-node component → C0001
+        for tmpl in ("T004", "T005"):
+            assert graph.nodes[tmpl]["cluster_id"] == "C0001", tmpl
 
-    def test_time_window_override(self):
-        g = build_graph(SYNTHETIC_EVENTS, time_window_seconds=20)
-        assert g.time_window_seconds == 20
+    def test_templates_beyond_max_nodes_excluded(self, monkeypatch):
+        monkeypatch.setattr(cfg, "GRAPH_MAX_NODES", 2)
+        df = build_sessions_df(n_sessions=3, templates_per_session=5)
+        graph = build_graph(df)
+        assert graph.number_of_nodes() <= 2
+        assert set(graph.nodes) == graph.graph["included_templates"]
 
-    def test_narrow_window_fewer_edges(self):
-        g_narrow = build_graph(SYNTHETIC_EVENTS, time_window_seconds=5)
-        g_default = build_graph(SYNTHETIC_EVENTS, time_window_seconds=60)
-        assert len(g_narrow.edges) < len(g_default.edges)
+    def test_load_or_build_graph_uses_cache(self, monkeypatch):
+        """Second call must load from the pkl cache, not invoke build_graph."""
+        import correlation.graph_builder as gb
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        graph1 = load_or_build_graph(df)  # builds and caches
 
-    def test_max_nodes_cap(self):
-        g = build_graph(SYNTHETIC_EVENTS, time_window_seconds=60, max_nodes=3)
-        template_nodes = [n for n in g.nodes.values() if n.node_type == "log_template"]
-        assert len(template_nodes) <= 3
-
-    def test_anomaly_node_admitted_regardless_of_cap(self):
-        g = build_graph(SYNTHETIC_EVENTS, time_window_seconds=60, max_nodes=1)
-        assert ANOMALY_LABEL in g.nodes
-
-    def test_empty_input(self):
-        g = build_graph([], time_window_seconds=60)
-        assert len(g.nodes) == 0
-        assert len(g.edges) == 0
-
-    def test_single_event_no_edges(self):
-        g = build_graph([LogEvent(timestamp=0, template="T1")], time_window_seconds=60)
-        assert "T1" in g.nodes
-        assert len(g.edges) == 0
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 tests: graph_builder extensions
-# ---------------------------------------------------------------------------
-
-class TestGraphBuilderExtensions:
-    def test_correlation_graph_to_nx(self, graph):
-        import networkx as nx
-        nx_g = correlation_graph_to_nx(graph)
-        assert isinstance(nx_g, nx.Graph)
-        assert nx_g.number_of_nodes() == len(graph.nodes)
-        assert nx_g.number_of_edges() == len(graph.edges)
-
-    def test_nx_node_attributes(self, graph):
-        nx_g = correlation_graph_to_nx(graph)
-        for node_id, attrs in nx_g.nodes(data=True):
-            assert "node_type" in attrs
-            assert "count" in attrs
-            assert attrs["node_type"] in ("log_template", "anomaly")
-            assert attrs["count"] > 0
-
-    def test_nx_edge_weight_attribute(self, graph):
-        nx_g = correlation_graph_to_nx(graph)
-        for u, v, data in nx_g.edges(data=True):
-            assert "weight" in data
-            assert 0.0 < data["weight"] <= 1.0
-
-    def test_persist_and_load_graph(self, graph, tmp_path):
-        pickle_path = str(tmp_path / "test_graph.gpickle")
-        persist_graph(graph, pickle_path)
-        loaded = load_graph(pickle_path)
-        assert set(loaded.nodes.keys()) == set(graph.nodes.keys())
-        assert len(loaded.edges) == len(graph.edges)
-
-    def test_load_graph_missing_file_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            load_graph(str(tmp_path / "nonexistent.gpickle"))
-
-    def test_build_graph_from_parquet(self, simple_log_df, tmp_path):
-        parquet_path = str(tmp_path / "test_logs.parquet")
-        simple_log_df.to_parquet(parquet_path, index=False)
-        g = build_graph_from_parquet(parquet_path, time_window_seconds=60)
-        assert len(g.nodes) > 0
-        # At minimum all templates from the events should appear as nodes
-        for tmpl in simple_log_df["template_id"].unique():
-            assert tmpl in g.nodes
-
-    def test_build_graph_from_parquet_datetime_timestamp(self, simple_log_df, tmp_path):
-        """Parquet files with datetime timestamps must be converted correctly."""
-        import pandas as pd
-        df = simple_log_df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-        parquet_path = str(tmp_path / "test_logs_dt.parquet")
-        df.to_parquet(parquet_path, index=False)
-        g = build_graph_from_parquet(parquet_path, time_window_seconds=60)
-        assert len(g.nodes) > 0
+        monkeypatch.setattr(
+            gb, "build_graph",
+            lambda _: pytest.fail("build_graph must not be called on a cache hit"),
+        )
+        graph2 = load_or_build_graph(df)  # must load from cache
+        assert graph2.number_of_nodes() == graph1.number_of_nodes()
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 tests: centrality
+# TestCentrality
 # ---------------------------------------------------------------------------
 
 class TestCentrality:
-    def test_returns_dataframe(self, centrality_df):
-        assert isinstance(centrality_df, pd.DataFrame)
+    def test_centrality_score_in_range(self):
+        df = build_sessions_df(n_sessions=5, templates_per_session=3)
+        result = compute_centrality(build_graph(df), df)
+        assert (result["centrality_score"] >= 0.0).all()
+        assert (result["centrality_score"] <= 1.0).all()
 
-    def test_required_columns(self, centrality_df):
-        required = {"node_id", "degree_centrality", "betweenness", "pagerank_score", "centrality_score"}
-        assert required.issubset(set(centrality_df.columns))
+    def test_betweenness_in_range(self):
+        df = build_sessions_df(n_sessions=5, templates_per_session=3)
+        result = compute_centrality(build_graph(df), df)
+        assert (result["betweenness"] >= 0.0).all()
+        assert (result["betweenness"] <= 1.0).all()
 
-    def test_one_row_per_node(self, graph, centrality_df):
-        assert len(centrality_df) == len(graph.nodes)
+    def test_degree_non_negative(self):
+        df = build_sessions_df(n_sessions=5, templates_per_session=3)
+        result = compute_centrality(build_graph(df), df)
+        assert (result["degree"] >= 0).all()
 
-    def test_no_nan_values(self, centrality_df):
-        assert not centrality_df[["degree_centrality", "betweenness", "pagerank_score"]].isna().any().any()
+    def test_in_graph_true_for_included_templates(self):
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        graph = build_graph(df)
+        result = compute_centrality(graph, df)
+        included = graph.graph["included_templates"]
+        tmpl_map = df.set_index("sequence_number")["template_id"]
+        for _, row in result.iterrows():
+            if tmpl_map[row["sequence_number"]] in included:
+                assert row["in_graph"] == True
 
-    def test_degree_centrality_in_range(self, centrality_df):
-        assert (centrality_df["degree_centrality"] >= 0.0).all()
-        assert (centrality_df["degree_centrality"] <= 1.0).all()
+    def test_in_graph_false_for_capped_templates(self, monkeypatch):
+        monkeypatch.setattr(cfg, "GRAPH_MAX_NODES", 2)
+        df = build_sessions_df(n_sessions=3, templates_per_session=5)
+        graph = build_graph(df)
+        result = compute_centrality(graph, df)
+        included = graph.graph["included_templates"]
+        tmpl_map = df.set_index("sequence_number")["template_id"]
+        capped = result[result.apply(
+            lambda r: tmpl_map[r["sequence_number"]] not in included, axis=1
+        )]
+        assert len(capped) > 0
+        assert (capped["in_graph"] == False).all()
 
-    def test_betweenness_in_range(self, centrality_df):
-        assert (centrality_df["betweenness"] >= 0.0).all()
-        assert (centrality_df["betweenness"] <= 1.0).all()
+    def test_capped_templates_get_global_mean_not_zero(self, monkeypatch):
+        monkeypatch.setattr(cfg, "GRAPH_MAX_NODES", 2)
+        df = build_sessions_df(n_sessions=5, templates_per_session=5)
+        graph = build_graph(df)
+        result = compute_centrality(graph, df)
+        global_mean = float(result[result["in_graph"]]["centrality_score"].mean())
+        capped_scores = result[~result["in_graph"]]["centrality_score"]
+        assert len(capped_scores) > 0
+        # Use abs diff — pytest.approx does not dispatch through pandas __eq__
+        assert (capped_scores - global_mean).abs().max() < 1e-6
 
-    def test_pagerank_in_range(self, centrality_df):
-        assert (centrality_df["pagerank_score"] >= 0.0).all()
-        assert (centrality_df["pagerank_score"] <= 1.0).all()
+    def test_capped_templates_cluster_id_is_uncapped(self, monkeypatch):
+        monkeypatch.setattr(cfg, "GRAPH_MAX_NODES", 2)
+        df = build_sessions_df(n_sessions=3, templates_per_session=5)
+        graph = build_graph(df)
+        result = compute_centrality(graph, df)
+        capped = result[~result["in_graph"]]
+        assert len(capped) > 0
+        assert (capped["cluster_id"] == "UNCAPPED").all()
 
-    def test_centrality_score_equals_pagerank(self, centrality_df):
-        assert (centrality_df["centrality_score"] == centrality_df["pagerank_score"]).all()
+    def test_degenerate_single_node_gives_half(self):
+        """Single-template graph → all-equal PageRank → degenerate case → 0.5."""
+        df = build_sessions_df(n_sessions=1, templates_per_session=1)
+        graph = build_graph(df)
+        result = compute_centrality(graph, df)
+        # Use abs diff — pytest.approx does not dispatch through pandas __eq__
+        assert (result["centrality_score"] - 0.5).abs().max() < 1e-6
 
-    def test_empty_graph_returns_empty_df(self):
-        g = build_graph([], time_window_seconds=60)
-        df = compute_centrality(g)
-        assert len(df) == 0
+    def test_correlated_log_ids_non_empty_for_neighbours(self):
+        """A template with a graph neighbour in the same session must have a
+        non-empty correlated_log_ids list."""
+        df = build_sessions_df(n_sessions=3, templates_per_session=2)
+        result = compute_centrality(build_graph(df), df)
+        in_graph_rows = result[result["in_graph"]]
+        total_correlated = in_graph_rows["correlated_log_ids"].apply(len).sum()
+        assert total_correlated > 0
 
-    def test_betweenness_k_used_for_large_graph(self, monkeypatch):
-        """When graph > BETWEENNESS_LARGE_GRAPH_THRESHOLD the k-approx path runs."""
-        import common.config as cfg
-        monkeypatch.setattr(cfg, "BETWEENNESS_LARGE_GRAPH_THRESHOLD", 0)
-        g = build_graph(SYNTHETIC_EVENTS, time_window_seconds=60)
-        df = compute_centrality(g)
-        # Should not raise and should still return valid scores
-        assert (df["betweenness"] >= 0.0).all()
-        assert (df["betweenness"] <= 1.0).all()
+    def test_correlated_log_ids_are_strings(self):
+        """correlated_log_ids must be a list of strings (sequence_number cast to str)."""
+        df = build_sessions_df(n_sessions=3, templates_per_session=2)
+        result = compute_centrality(build_graph(df), df)
+        for vals in result["correlated_log_ids"]:
+            assert isinstance(vals, list)
+            for v in vals:
+                assert isinstance(v, str), f"Expected str in correlated_log_ids, got {type(v)}"
 
-
-# ---------------------------------------------------------------------------
-# Phase 3 tests: graph_scores_df output contract
-# ---------------------------------------------------------------------------
-
-class TestGraphScoresDf:
-    @pytest.fixture
-    def scores_df(self, graph, centrality_df, simple_log_df):
-        return build_graph_scores_df(centrality_df, simple_log_df, graph)
-
-    def test_returns_dataframe(self, scores_df):
-        assert isinstance(scores_df, pd.DataFrame)
-
-    def test_one_row_per_log_id(self, simple_log_df, scores_df):
-        assert len(scores_df) == len(simple_log_df)
-
-    def test_schema_contract(self, scores_df):
-        """P4 output contract: exact column set in exact order."""
-        expected = [
-            "log_id", "centrality_score", "degree",
-            "betweenness", "cluster_id", "in_sequence", "correlated_log_ids",
-        ]
-        assert list(scores_df.columns) == expected
-
-    def test_centrality_score_in_range(self, scores_df):
-        assert (scores_df["centrality_score"] >= 0.0).all()
-        assert (scores_df["centrality_score"] <= 1.0).all()
-
-    def test_betweenness_in_range(self, scores_df):
-        assert (scores_df["betweenness"] >= 0.0).all()
-        assert (scores_df["betweenness"] <= 1.0).all()
-
-    def test_degree_is_int(self, scores_df):
-        assert scores_df["degree"].dtype in (int, "int64", "int32")
-
-    def test_in_sequence_is_bool(self, scores_df):
-        assert scores_df["in_sequence"].dtype == bool
-
-    def test_cluster_id_is_string(self, scores_df):
-        # pandas 2.x may use StringDtype instead of object; check values directly
-        assert scores_df["cluster_id"].str.startswith("cc_").all()
-
-    def test_correlated_log_ids_is_list_column(self, scores_df):
-        assert scores_df["correlated_log_ids"].dtype == object
-        for val in scores_df["correlated_log_ids"]:
-            assert isinstance(val, list)
-
-    def test_in_sequence_populated_from_set(self, graph, centrality_df, simple_log_df):
-        first_log_id = simple_log_df["log_id"].iloc[0]
-        df = build_graph_scores_df(
-            centrality_df, simple_log_df, graph,
-            sequence_log_ids={first_log_id}
-        )
-        assert df.loc[df["log_id"] == first_log_id, "in_sequence"].iloc[0] == True
-
-    def test_no_missing_log_ids(self, simple_log_df, scores_df):
-        assert set(scores_df["log_id"]) == set(simple_log_df["log_id"])
-
-    def test_parquet_roundtrip(self, scores_df, tmp_path):
-        path = str(tmp_path / "graph_scores_df.parquet")
-        scores_df.to_parquet(path, index=False)
-        reloaded = pd.read_parquet(path)
-        assert list(reloaded.columns) == list(scores_df.columns)
-        assert len(reloaded) == len(scores_df)
+    def test_output_schema_matches_graphscorerow(self):
+        expected_cols = [f.name for f in dataclasses.fields(GraphScoreRow)]
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        result = compute_centrality(build_graph(df), df)
+        assert list(result.columns) == expected_cols
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 tests: sequence_engine
+# TestSequenceEngine
 # ---------------------------------------------------------------------------
+
+def _make_sequence_df(n_with_seq: int, n_noise: int = 0) -> pd.DataFrame:
+    """Build a df where the first n_with_seq sessions contain T001→T002→T003
+    within 30 s (fits SEQUENCE_WINDOW_SECONDS), plus n_noise single-log sessions."""
+    rows = []
+    seq_num = 0
+    base = pd.Timestamp("2026-01-01")
+    for s in range(n_with_seq):
+        ts_base = base + pd.Timedelta(seconds=s * 600)
+        for i, tmpl in enumerate(["T001", "T002", "T003"]):
+            rows.append({
+                "sequence_number": seq_num,
+                "session_id": f"seq_{s:03d}",
+                "template_id": tmpl,
+                "timestamp": ts_base + pd.Timedelta(seconds=i * 5),
+                "host": "h", "frequency": 1,
+            })
+            seq_num += 1
+    for s in range(n_noise):
+        ts_base = base + pd.Timedelta(seconds=(n_with_seq + s) * 600)
+        rows.append({
+            "sequence_number": seq_num,
+            "session_id": f"noise_{s:03d}",
+            "template_id": "T999",
+            "timestamp": ts_base,
+            "host": "h", "frequency": 1,
+        })
+        seq_num += 1
+    return pd.DataFrame(rows)
+
 
 class TestSequenceEngine:
-    def test_returns_set(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        result = detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        assert isinstance(result, set)
+    def test_sequence_above_support_is_known_pattern(self, tmp_path):
+        """Sequence appearing in >= 5 sessions → returned in result set."""
+        df = _make_sequence_df(n_with_seq=6)
+        out = str(tmp_path / "seq.json")
+        result = detect_sequences(df, min_length=3, min_support=5, output_path=out)
+        assert len(result) > 0
 
-    def test_sequences_json_is_valid_json(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        with open(out) as fh:
-            data = json.load(fh)
+    def test_sequence_below_support_is_not_detected(self, tmp_path):
+        """Sequence appearing in < 5 sessions → empty result set."""
+        df = _make_sequence_df(n_with_seq=3)
+        out = str(tmp_path / "seq.json")
+        result = detect_sequences(df, min_length=3, min_support=5, output_path=out)
+        assert len(result) == 0
+
+    def test_in_sequence_true_for_known_pattern_logs(self, tmp_path):
+        """Logs belonging to a known sequence → in_sequence = True after isin()."""
+        df = _make_sequence_df(n_with_seq=6)
+        out = str(tmp_path / "seq.json")
+        seq_set = detect_sequences(df, min_length=3, min_support=5, output_path=out)
+        in_seq = df["sequence_number"].isin(seq_set)
+        assert in_seq.any()
+
+    def test_in_sequence_false_for_noise_logs(self, tmp_path):
+        """Logs not part of any sequence (T999 noise) → not in result set."""
+        df = _make_sequence_df(n_with_seq=6, n_noise=4)
+        out = str(tmp_path / "seq.json")
+        seq_set = detect_sequences(df, min_length=3, min_support=5, output_path=out)
+        noise_seqnums = set(df[df["template_id"] == "T999"]["sequence_number"])
+        assert noise_seqnums.isdisjoint(seq_set)
+
+    def test_sequences_json_structure(self, tmp_path):
+        """sequences.json must be a list where each entry has the correct keys."""
+        df = _make_sequence_df(n_with_seq=6)
+        out = str(tmp_path / "seq.json")
+        detect_sequences(df, min_length=3, min_support=5, output_path=out)
+        with open(out) as f:
+            data = json.load(f)
         assert isinstance(data, list)
-
-    def test_sequence_entry_schema(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        with open(out) as fh:
-            data = json.load(fh)
+        assert len(data) > 0
         for entry in data:
             assert "sequence" in entry
             assert "support_count" in entry
@@ -464,116 +374,72 @@ class TestSequenceEngine:
             assert isinstance(entry["support_count"], int)
             assert isinstance(entry["session_ids"], list)
 
-    def test_sequence_min_length_respected(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        with open(out) as fh:
-            data = json.load(fh)
-        for entry in data:
-            assert len(entry["sequence"]) >= 3
-
-    def test_sequence_min_support_respected(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        min_sup = 3
-        detect_sequences(sequence_log_df, min_length=3, min_support=min_sup, output_path=out)
-        with open(out) as fh:
-            data = json.load(fh)
-        for entry in data:
-            assert entry["support_count"] >= min_sup
-
-    def test_seeded_sequence_detected(self, sequence_log_df, tmp_path):
-        """The deliberately seeded A->B->C sequence must be detected."""
-        out = str(tmp_path / "sequences.json")
-        detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        with open(out) as fh:
-            data = json.load(fh)
-        sequences = [tuple(e["sequence"]) for e in data]
-        assert ("A", "B", "C") in sequences
-
-    def test_in_sequence_log_ids_nonempty(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        result = detect_sequences(sequence_log_df, min_length=3, min_support=3, output_path=out)
-        assert len(result) > 0
-
-    def test_missing_column_raises(self, tmp_path):
-        bad_df = pd.DataFrame({"log_id": ["a"], "session_id": ["s0"]})
-        with pytest.raises(ValueError, match="missing columns"):
-            detect_sequences(bad_df, output_path=str(tmp_path / "out.json"))
-
-    def test_high_min_support_yields_empty(self, sequence_log_df, tmp_path):
-        out = str(tmp_path / "sequences.json")
-        result = detect_sequences(
-            sequence_log_df, min_length=3, min_support=9999, output_path=out
-        )
+    def test_single_log_sessions_no_sequences_no_crash(self, tmp_path):
+        """Single-log sessions cannot form sequences — must return empty set."""
+        df = pd.DataFrame({
+            "sequence_number": [0, 1, 2],
+            "session_id":      ["s0", "s1", "s2"],
+            "template_id":     ["T001", "T001", "T001"],
+            "timestamp":       [pd.Timestamp("2026-01-01")] * 3,
+            "host":            ["h"] * 3,
+            "frequency":       [1] * 3,
+        })
+        out = str(tmp_path / "seq.json")
+        result = detect_sequences(df, min_length=3, min_support=5, output_path=out)
         assert result == set()
-        with open(out) as fh:
-            data = json.load(fh)
-        assert data == []
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 tests: graph_visualizer
+# TestGraphVisualizer
 # ---------------------------------------------------------------------------
 
 class TestGraphVisualizer:
     @pytest.fixture
-    def json_payload(self, graph, centrality_df, tmp_path):
-        out = str(tmp_path / "correlation_graph.json")
-        payload = export_graph_json(graph, centrality_df, output_path=out)
-        return payload, out
+    def exported(self, tmp_path):
+        """Build a small graph, export JSON, and return (graph, parsed_data)."""
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        graph = build_graph(df)
+        out = str(tmp_path / "graph.json")
+        export_graph_json(graph, out)
+        with open(out) as f:
+            data = json.load(f)
+        return graph, data
 
-    def test_file_is_valid_json(self, json_payload):
-        _, path = json_payload
-        with open(path) as fh:
-            data = json.load(fh)
+    def test_returns_output_path(self, tmp_path):
+        df = build_sessions_df(n_sessions=3, templates_per_session=3)
+        graph = build_graph(df)
+        out = str(tmp_path / "graph.json")
+        assert export_graph_json(graph, out) == out
+
+    def test_file_is_valid_json(self, exported):
+        _, data = exported
         assert isinstance(data, dict)
 
-    def test_top_level_keys(self, json_payload):
-        payload, _ = json_payload
-        assert "nodes" in payload
-        assert "edges" in payload
+    def test_top_level_keys(self, exported):
+        _, data = exported
+        assert "nodes" in data
+        assert "edges" in data
+        assert "metadata" in data
 
-    def test_nodes_nonempty(self, json_payload):
-        payload, _ = json_payload
-        assert len(payload["nodes"]) > 0
+    def test_all_node_ids_exist_in_graph(self, exported):
+        graph, data = exported
+        graph_node_ids = set(graph.nodes)
+        for node in data["nodes"]:
+            assert node["id"] in graph_node_ids
 
-    def test_edges_nonempty(self, json_payload):
-        payload, _ = json_payload
-        assert len(payload["edges"]) > 0
+    def test_edge_endpoints_exist_as_node_ids(self, exported):
+        _, data = exported
+        node_ids = {n["id"] for n in data["nodes"]}
+        for edge in data["edges"]:
+            assert edge["source"] in node_ids
+            assert edge["target"] in node_ids
 
-    def test_node_schema(self, json_payload):
-        payload, _ = json_payload
-        for node in payload["nodes"]:
-            assert "id" in node
-            assert "template" in node
-            assert "node_type" in node
-            assert "centrality_score" in node
-            assert isinstance(node["centrality_score"], float)
-            assert 0.0 <= node["centrality_score"] <= 1.0
+    def test_metadata_n_nodes_matches_graph(self, exported):
+        graph, data = exported
+        assert data["metadata"]["n_nodes"] == graph.number_of_nodes()
 
-    def test_edge_schema(self, json_payload):
-        payload, _ = json_payload
-        for edge in payload["edges"]:
-            assert "source" in edge
-            assert "target" in edge
-            assert "weight" in edge
-            assert isinstance(edge["weight"], float)
-            assert 0.0 < edge["weight"] <= 1.0
-
-    def test_node_count_matches_graph(self, graph, centrality_df, tmp_path):
-        out = str(tmp_path / "g.json")
-        payload = export_graph_json(graph, centrality_df, output_path=out)
-        assert len(payload["nodes"]) == len(graph.nodes)
-
-    def test_edge_count_matches_graph(self, graph, centrality_df, tmp_path):
-        out = str(tmp_path / "g.json")
-        payload = export_graph_json(graph, centrality_df, output_path=out)
-        assert len(payload["edges"]) == len(graph.edges)
-
-    def test_empty_graph_produces_empty_lists(self, tmp_path):
-        empty_g = build_graph([], time_window_seconds=60)
-        empty_centrality = compute_centrality(empty_g)
-        out = str(tmp_path / "empty.json")
-        payload = export_graph_json(empty_g, empty_centrality, output_path=out)
-        assert payload["nodes"] == []
-        assert payload["edges"] == []
+    def test_export_graph_png_returns_none(self, tmp_path):
+        df = build_sessions_df(n_sessions=1, templates_per_session=2)
+        graph = build_graph(df)
+        result = export_graph_png(graph, str(tmp_path / "graph.png"))
+        assert result is None
