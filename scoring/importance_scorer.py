@@ -1,246 +1,179 @@
 """
-importance_scorer.py
-====================
+scoring/importance_scorer.py
 
-Phase 2 — Full Importance Score Integration
-Assignee: Ujwal Hegde
+Merge upstream signals (features, anomaly, graph) into a single DataFrame
+and compute the per-log final importance score.
 
-Loads:
-    - features_df.parquet
-    - anomaly_df.parquet
-    - graph_scores_df.parquet
+Public API
+----------
+score(features_df, anomaly_df, graph_scores_df) -> pd.DataFrame
+    Returns the full merged DataFrame including temporal_proximity.
+    Does NOT save to parquet — downstream modules (incident_clusterer)
+    need temporal_proximity, and root_cause_engine saves the final output.
 
-Merges all signals into a final importance score.
-
-Output:
-    scored_logs_df.parquet
+run(features_path, anomaly_path, graph_path) -> pd.DataFrame
+    Thin wrapper: loads parquets via load_parquet() and calls score().
 """
 
-from pathlib import Path
+from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
-from common.config import (
-    ML_WEIGHT,
-    GRAPH_WEIGHT,
-    RULE_WEIGHT,
-)
-
+import common.config as cfg
 from common.logger import get_logger
+from common.utils import load_parquet
 
 logger = get_logger(__name__)
 
-# -------------------------------------------------------------------
-# Paths
-# -------------------------------------------------------------------
-
-DATA_DIR = Path("data/processed")
-
-FEATURES_PATH = DATA_DIR / "features_df.parquet"
-ANOMALY_PATH = DATA_DIR / "anomaly_df.parquet"
-GRAPH_PATH = DATA_DIR / "graph_scores_df.parquet"
-
-OUTPUT_PATH = DATA_DIR / "scored_logs_df.parquet"
+_BOOL_FILL_COLS = {"is_anomaly", "in_graph", "in_sequence"}
 
 
-# -------------------------------------------------------------------
-# Load helpers
-# -------------------------------------------------------------------
-
-def load_inputs():
-
-    logger.info("Loading parquet inputs...")
-
-    # ---------------------------------------------------------------
-    # Features (mandatory)
-    # ---------------------------------------------------------------
-
-    if not FEATURES_PATH.exists():
-
-        raise FileNotFoundError(
-            "features_df.parquet not found. "
-            "Feature pipeline must run before scoring."
-        )
-
-    features_df = pd.read_parquet(FEATURES_PATH)
-
-    # ---------------------------------------------------------------
-    # Anomaly scores (graceful fallback)
-    # ---------------------------------------------------------------
-
-    if ANOMALY_PATH.exists():
-
-        anomaly_df = pd.read_parquet(ANOMALY_PATH)
-
-        logger.info(
-            f"Loaded anomaly_df "
-            f"({len(anomaly_df)} rows)"
-        )
-
-    else:
-
-        logger.warning(
-            "anomaly_df.parquet not found. "
-            "Using fallback combined_score = 0.0"
-        )
-
-        anomaly_df = pd.DataFrame({
-            "log_id": features_df["log_id"],
-            "combined_score": 0.0,
-        })
-
-    # ---------------------------------------------------------------
-    # Graph scores (graceful fallback)
-    # ---------------------------------------------------------------
-
-    if GRAPH_PATH.exists():
-
-        graph_scores_df = pd.read_parquet(GRAPH_PATH)
-
-        logger.info(
-            f"Loaded graph_scores_df "
-            f"({len(graph_scores_df)} rows)"
-        )
-
-    else:
-
-        logger.warning(
-            "graph_scores_df.parquet not found. "
-            "Using fallback centrality_score = 0.0"
-        )
-
-        graph_scores_df = pd.DataFrame({
-            "log_id": features_df["log_id"],
-            "centrality_score": 0.0,
-        })
-
-    logger.info(
-        f"Loaded:"
-        f" features={len(features_df)},"
-        f" anomaly={len(anomaly_df)},"
-        f" graph={len(graph_scores_df)}"
-    )
-
-    return features_df, anomaly_df, graph_scores_df
-
-
-# -------------------------------------------------------------------
-# Merge all signals
-# -------------------------------------------------------------------
-
-def merge_inputs(
+def score(
     features_df: pd.DataFrame,
     anomaly_df: pd.DataFrame,
     graph_scores_df: pd.DataFrame,
-):
+) -> pd.DataFrame:
+    """Merge upstream signals and compute final_score per log.
 
-    logger.info("Merging inputs on log_id...")
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        P2 output. Must contain: sequence_number, session_id, timestamp.
+    anomaly_df : pd.DataFrame
+        P3-ML output. Must contain: sequence_number, combined_score.
+    graph_scores_df : pd.DataFrame
+        P3-Graph output. Must contain: sequence_number, centrality_score,
+        in_graph, cluster_id.
 
-    merged_df = features_df.merge(
-        anomaly_df,
-        on="log_id",
-        how="outer",
+    Returns
+    -------
+    pd.DataFrame
+        Merged df with final_score and temporal_proximity added.
+        temporal_proximity is a DBSCAN processing artifact — it is dropped
+        before the final scored_logs_df.parquet is written.
+    """
+    # Step 1 — left join all three on sequence_number
+    n_missing_anomaly = int(
+        (~features_df["sequence_number"].isin(anomaly_df["sequence_number"])).sum()
+    )
+    n_missing_graph = int(
+        (~features_df["sequence_number"].isin(graph_scores_df["sequence_number"])).sum()
     )
 
-    merged_df = merged_df.merge(
-        graph_scores_df,
-        on="log_id",
-        how="outer",
+    df = (
+        features_df
+        .merge(anomaly_df, on="sequence_number", how="left")
+        .merge(graph_scores_df, on="sequence_number", how="left")
     )
-
-    # ---------------------------------------------------------------
-    # Fill missing scores
-    # ---------------------------------------------------------------
-
-    score_cols = [
-        "combined_score",
-        "centrality_score",
-        "severity_weight",
-    ]
-
-    for col in score_cols:
-
-        missing = merged_df[col].isnull().sum()
-
-        if missing > 0:
-            logger.warning(
-                f"{missing} missing values in {col} "
-                f"filled with 0.0"
-            )
-
-            merged_df[col] = merged_df[col].fillna(0.0)
-
-    return merged_df
-
-
-# -------------------------------------------------------------------
-# Final score computation
-# -------------------------------------------------------------------
-
-def compute_final_score(df: pd.DataFrame):
-
-    logger.info("Computing final importance score...")
-
-    df["final_score"] = (
-        (ML_WEIGHT * df["combined_score"])
-        + (GRAPH_WEIGHT * df["centrality_score"])
-        + (RULE_WEIGHT * df["severity_weight"])
-    )
-
-    # Keep scores within [0,1]
-    df["final_score"] = df["final_score"].clip(0.0, 1.0)
 
     logger.info(
-        f"Final score range:"
-        f" [{df['final_score'].min():.4f},"
-        f" {df['final_score'].max():.4f}]"
+        "Merged inputs: total_rows=%d, missing_from_anomaly_df=%d, "
+        "missing_from_graph_scores_df=%d",
+        len(df), n_missing_anomaly, n_missing_graph,
     )
+
+    # Step 2 — fill missing values
+    # Bool columns (is_anomaly, in_graph, in_sequence) → False
+    for col in _BOOL_FILL_COLS:
+        if col in df.columns:
+            null_mask = df[col].isna()
+            n = int(null_mask.sum())
+            if n:
+                df[col] = df[col].fillna(False)
+                logger.warning(
+                    "Column %s: %d rows filled with False due to missing upstream data",
+                    col, n,
+                )
+
+    # cluster_id (str) → "UNCAPPED"
+    if "cluster_id" in df.columns:
+        null_mask = df["cluster_id"].isna()
+        n = int(null_mask.sum())
+        if n:
+            df["cluster_id"] = df["cluster_id"].fillna("UNCAPPED")
+            logger.warning(
+                "Column cluster_id: %d rows filled with 'UNCAPPED' due to "
+                "missing upstream data",
+                n,
+            )
+
+    # correlated_log_ids (list) → []
+    # Use .at to avoid pandas interpreting a list-of-lists as a 2D array.
+    if "correlated_log_ids" in df.columns:
+        for idx in df.index[df["correlated_log_ids"].isna()]:
+            df.at[idx, "correlated_log_ids"] = []
+
+    # Float/int columns from anomaly_df and graph_scores_df → column mean
+    _special = (
+        {"sequence_number"} | _BOOL_FILL_COLS | {"cluster_id", "correlated_log_ids"}
+    )
+    fill_cols = list(dict.fromkeys(
+        c for c in list(anomaly_df.columns) + list(graph_scores_df.columns)
+        if c not in _special
+    ))
+    for col in fill_cols:
+        if col not in df.columns:
+            continue
+        null_mask = df[col].isna()
+        n = int(null_mask.sum())
+        if n:
+            mean_val = float(df[col].mean())
+            df[col] = df[col].fillna(mean_val)
+            logger.warning(
+                "Column %s: %d rows filled with mean (%.4f) due to missing upstream data",
+                col, n, mean_val,
+            )
+
+    # Verify critical columns have no nulls after fill
+    for req in ("combined_score", "centrality_score"):
+        if req in df.columns and df[req].isna().any():
+            raise ValueError(
+                f"Column '{req}' still has NaN after fill — check upstream data"
+            )
+
+    # Step 3 — temporal_proximity per session (for DBSCAN; not saved to parquet)
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        ts_num = df["timestamp"].astype("int64")
+    else:
+        ts_num = df["timestamp"].astype(float)
+    df["_ts_num"] = ts_num
+    session_min = df.groupby("session_id")["_ts_num"].transform("min")
+    session_max = df.groupby("session_id")["_ts_num"].transform("max")
+    df["temporal_proximity"] = (df["_ts_num"] - session_min) / (
+        session_max - session_min + 1e-10
+    )
+    df = df.drop(columns=["_ts_num"])
+
+    # Step 4 — final_score (2-term formula, clipped to [0, 1])
+    df["final_score"] = (
+        cfg.SCORING_ML_WEIGHT * df["combined_score"]
+        + cfg.SCORING_GRAPH_WEIGHT * df["centrality_score"]
+    ).clip(0.0, 1.0)
+
+    # Step 5 — validate
+    if df["sequence_number"].isna().any():
+        raise ValueError("sequence_number has NaN values after merge")
+    if df["final_score"].isna().any():
+        raise ValueError("final_score has NaN values")
+    if not np.isfinite(df["final_score"].to_numpy()).all():
+        raise ValueError("final_score has inf or NaN values")
 
     return df
 
 
-# -------------------------------------------------------------------
-# Save output
-# -------------------------------------------------------------------
+def run(
+    features_path: str = "data/processed/features_df.parquet",
+    anomaly_path: str = "data/processed/anomaly_df.parquet",
+    graph_path: str = "data/processed/graph_scores_df.parquet",
+) -> pd.DataFrame:
+    """Full scoring pipeline entry point (called by root pipeline.py).
 
-def save_output(df: pd.DataFrame):
-
-    OUTPUT_PATH.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    df.to_parquet(
-        OUTPUT_PATH,
-        index=False,
-    )
-
-    logger.info(
-        f"Saved scored logs to {OUTPUT_PATH}"
-    )
-
-
-# -------------------------------------------------------------------
-# Main pipeline
-# -------------------------------------------------------------------
-
-def run():
-
-    features_df, anomaly_df, graph_scores_df = load_inputs()
-
-    merged_df = merge_inputs(
-        features_df,
-        anomaly_df,
-        graph_scores_df,
-    )
-
-    scored_logs_df = compute_final_score(merged_df)
-
-    save_output(scored_logs_df)
-
-    return scored_logs_df
-
-
-if __name__ == "__main__":
-
-    run()
+    Delegates to scoring.pipeline.run_scoring_pipeline() which orchestrates
+    all four steps: score → map_labels → cluster_incidents → identify_root_causes.
+    The lazy import here breaks the potential circular-import cycle at module
+    load time (scoring.pipeline imports score from this module at call time).
+    """
+    from scoring.pipeline import run_scoring_pipeline
+    scored_df, _ = run_scoring_pipeline(features_path, anomaly_path, graph_path)
+    return scored_df

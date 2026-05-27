@@ -103,15 +103,34 @@ class GraphScoreRow:
 
 @dataclass
 class ScoredLogRow:
-    """One row of scored_logs_df.parquet (P5 output).
+    """One row of scored_logs_df.parquet (P4 output).
 
-    importance_score = SCORING_WEIGHT_ML * combined_score
-                     + SCORING_WEIGHT_GRAPH * centrality_score
-                     + SCORING_WEIGHT_RULE * event_weight
+    final_score = SCORING_ML_WEIGHT * combined_score
+                + SCORING_GRAPH_WEIGHT * centrality_score
     Clipped to [0.0, 1.0] before saving.
+
+    correlation_id is the DBSCAN incident cluster ID assigned in P4
+    (incident_clusterer.py). It is distinct from cluster_id (P3), which
+    is the graph connected-component label used as input to DBSCAN.
     """
     sequence_number: int
-    importance_score: float  # [0.0, 1.0]
-    label: str               # ignore | low | medium | critical
-    correlation_id: Optional[str]   # propagated from GraphScoreRow
+    final_score: float             # [0.0, 1.0]
+    label: str                     # ignore | low | medium | critical
+    correlation_id: Optional[str]  # DBSCAN incident cluster ID; None = noise
     is_root_cause: bool
+    root_cause_confidence: float   # [0.0, 1.0]; 0.0 for non-root-cause rows
+    is_cross_system: bool          # True if incident spans multiple cluster_ids
+
+
+@dataclass
+class RootCauseRow:
+    """One row of root_causes_df.parquet (P4 output).
+
+    One row per root cause candidate across all incidents.
+    root_cause_log_id is the sequence_number of the candidate log.
+    in_graph reflects whether the candidate was an in-graph node in P3.
+    """
+    incident_id: str
+    root_cause_log_id: int    # sequence_number of the candidate
+    confidence_score: float   # [0.0, 1.0]
+    in_graph: bool

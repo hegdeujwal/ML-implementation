@@ -1,68 +1,74 @@
 """
-label_mapper.py
-===============
+scoring/label_mapper.py
 
-Maps final_score to human-readable severity labels.
+Map final_score to a human-readable severity label.
 
-Labels:
-    ignore
-    low
-    medium
-    critical
+Public API
+----------
+map_labels(scored_df) -> pd.DataFrame
+    Adds a "label" column; returns the updated DataFrame.
+
+run() -> pd.DataFrame
+    Thin wrapper: loads scored_logs_df.parquet and calls map_labels().
 """
 
-from pathlib import Path
+from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
-from common.config import LABEL_THRESHOLDS
+from common.config import LABEL_IGNORE_MAX, LABEL_LOW_MAX, LABEL_MEDIUM_MAX
 from common.logger import get_logger
+from common.utils import load_parquet
 
 logger = get_logger(__name__)
 
-DATA_DIR = Path("data/processed")
-
-SCORED_PATH = DATA_DIR / "scored_logs_df.parquet"
+_SCORED_PATH = "data/processed/scored_logs_df.parquet"
 
 
-def map_label(score: float) -> str:
+def map_labels(scored_df: pd.DataFrame) -> pd.DataFrame:
+    """Add a label column derived from final_score.
 
-    for label, (lower, upper) in LABEL_THRESHOLDS.items():
+    Thresholds (all from common/config.py):
+        final_score <= LABEL_IGNORE_MAX  → "ignore"
+        final_score <= LABEL_LOW_MAX     → "low"
+        final_score <= LABEL_MEDIUM_MAX  → "medium"
+        final_score >  LABEL_MEDIUM_MAX  → "critical"
 
-        if lower <= score < upper:
-            return label
+    Parameters
+    ----------
+    scored_df : pd.DataFrame
+        Must contain a "final_score" column with values in [0, 1].
 
-    # Edge case: exactly 1.0
-    return "critical"
+    Returns
+    -------
+    pd.DataFrame
+        Input df with "label" column added.
+    """
+    df = scored_df.copy()
 
-
-def run():
-
-    logger.info("Loading scored logs...")
-
-    df = pd.read_parquet(SCORED_PATH)
-
-    logger.info("Mapping labels from final_score...")
-
-    df["label"] = df["final_score"].apply(map_label)
-
-    df.to_parquet(
-        SCORED_PATH,
-        index=False,
+    df["label"] = np.select(
+        [
+            df["final_score"] <= LABEL_IGNORE_MAX,
+            df["final_score"] <= LABEL_LOW_MAX,
+            df["final_score"] <= LABEL_MEDIUM_MAX,
+        ],
+        ["ignore", "low", "medium"],
+        default="critical",
     )
 
-    logger.info(
-        "Labels added successfully."
-    )
+    if df["label"].isna().any():
+        raise ValueError("label column has NaN values after mapping — check final_score column")
 
-    logger.info(
-        f"Label distribution:\n"
-        f"{df['label'].value_counts()}"
-    )
+    total = len(df)
+    dist = df["label"].value_counts()
+    for lbl, count in dist.items():
+        logger.info("Label %-8s: %5d rows (%5.1f%%)", lbl, count, 100 * count / total)
 
     return df
 
 
-if __name__ == "__main__":
-
-    run()
+def run() -> pd.DataFrame:
+    """Thin wrapper: load scored_logs_df.parquet and call map_labels()."""
+    df = load_parquet(_SCORED_PATH)
+    return map_labels(df)

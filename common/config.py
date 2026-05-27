@@ -253,18 +253,28 @@ MODEL_STORE_PATH: str = "ml/model_store"
 # ---------------------------------------------------------------------------
 # Phase 4 — Importance Scoring (P4: Ujwal Hegde)
 # ---------------------------------------------------------------------------
- 
-# Weights for the final importance score (ML + graph + rule-based signals)
-SCORING_WEIGHT_ML: float = 0.40
-SCORING_WEIGHT_GRAPH: float = 0.35
-SCORING_WEIGHT_RULE: float = 0.25
- 
+
+# Weights for the final importance score — 2-term formula.
+# event_weight flows through the ML model indirectly via combined_score.
+# Weights sum to 1.0.
+SCORING_ML_WEIGHT: float = 0.65
+SCORING_GRAPH_WEIGHT: float = 0.35
+
 # Label thresholds: ignore / low / medium / critical
 LABEL_IGNORE_MAX: float = 0.2
 LABEL_LOW_MAX: float = 0.5
 LABEL_MEDIUM_MAX: float = 0.75
 # Anything above LABEL_MEDIUM_MAX → critical
- 
+
 # DBSCAN clustering parameters (incident_clusterer.py)
 DBSCAN_EPS: float = 0.3
 DBSCAN_MIN_SAMPLES: int = 5
+
+# Root cause candidates selected per incident cluster.
+ROOT_CAUSE_TOP_N: int = 3
+
+# Missing upstream input fill strategy.
+# Rows absent from anomaly_df or graph_scores_df after the left join are
+# filled with the column mean of the non-null rows. Boolean columns
+# (is_anomaly, in_graph, in_sequence) are always filled with False.
+MISSING_INPUT_FILL: str = "mean"
