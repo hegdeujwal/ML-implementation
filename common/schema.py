@@ -70,14 +70,17 @@ class FeaturesRow:
 class AnomalyRow:
     """One row of anomaly_df.parquet (P3 output).
 
-    combined_score = WEIGHT_ISOLATION * isolation_score + WEIGHT_ZSCORE * zscore_norm.
-    is_anomaly = combined_score > ANOMALY_THRESHOLD.
+    combined_score = confidence * (IF_ISOLATION_WEIGHT * isolation_score
+                                   + IF_ZSCORE_WEIGHT * zscore_norm)
+                   + (1 - confidence) * zscore_norm
+    is_anomaly = combined_score > ANOMALY_SCORE_THRESHOLD.
     """
     sequence_number: int
-    isolation_score: float   # IsolationForest score [0, 1]; 0.0 during cold-start
-    zscore: float            # raw (unnormalised) z-score
-    combined_score: float    # hybrid blended score [0, 1]
+    isolation_score: float   # IsolationForest score normalised to [0, 1]; 0.5 when all scores identical
+    zscore_norm: float       # zscore_base from P2 clipped to [-5,5] then scaled to [0, 1]
+    combined_score: float    # confidence-weighted hybrid score [0, 1]
     is_anomaly: bool
+    model_confidence: float  # linear ramp 0.0 → 1.0 as n_training_samples grows
 
 
 @dataclass

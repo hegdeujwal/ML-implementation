@@ -198,7 +198,53 @@ TRAINING_WINDOW_SESSIONS: int = 10
 # Periodic retraining trigger: retrain every K new log rows ingested.
 # Lower K = fresher model but more compute. Start high, tune down if needed.
 RETRAIN_EVERY_K_LOGS: int = 500
- 
+
+# ---------------------------------------------------------------------------
+# Phase 3 — IsolationForest hyperparameters (P3: Shreeraksha M)
+# ---------------------------------------------------------------------------
+
+# "auto" lets sklearn set contamination to 1/n_estimators; avoids overfitting
+# the anomaly fraction assumption on small real-data batches.
+IF_CONTAMINATION: str = "auto"
+
+IF_N_ESTIMATORS: int = 100
+IF_RANDOM_STATE: int = 42
+
+# Feature columns fed into IsolationForest.
+# Identifiers (sequence_number, session_id, host, template_id, timestamp) and
+# rule-based signals (event_weight) are excluded — they are not learned features.
+IF_FEATURE_COLUMNS: list = [
+    "frequency_score",
+    "burstiness_score",
+    "zscore_base",
+    "time_delta_prev",
+    "time_delta_session_start",
+    "inter_arrival_rate",
+    "counter_proximity",
+]
+
+# Hybrid score weights (IF weighted higher — it captures multi-feature interactions
+# that the per-column zscore_base signal misses).
+IF_ISOLATION_WEIGHT: float = 0.7
+IF_ZSCORE_WEIGHT: float = 0.3
+
+# Model confidence scales linearly 0.0 → 1.0 as training samples grow.
+# Below this threshold the blend leans on zscore_base; at or above it the full
+# hybrid score is used.
+COLD_START_FULL_CONFIDENCE_THRESHOLD: int = 500
+
+# Combined score above this value → is_anomaly = True.
+ANOMALY_SCORE_THRESHOLD: float = 0.5
+
+# Sliding window: retrain on the last N sessions only.
+RETRAINING_SESSION_WINDOW: int = 50
+
+# Periodic trigger: retrain every K new log rows ingested.
+RETRAINING_TRIGGER_EVERY_K: int = 1000
+
+# Directory where versioned model pkl files and JSON sidecars are stored.
+MODEL_STORE_PATH: str = "ml/model_store"
+
 # ---------------------------------------------------------------------------
 # Phase 4 — Importance Scoring (P4: Ujwal Hegde)
 # ---------------------------------------------------------------------------

@@ -17,32 +17,33 @@ Usage:
 """
 
 import json
-import logging
-import pickle
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import joblib
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
 
 from common.config import (
-    CONTAMINATION,
-    WEIGHT_ISOLATION,
-    WEIGHT_ZSCORE,
+    IF_CONTAMINATION,
+    IF_FEATURE_COLUMNS,
+    IF_ISOLATION_WEIGHT,
+    IF_N_ESTIMATORS,
+    IF_RANDOM_STATE,
+    IF_ZSCORE_WEIGHT,
+    COLD_START_FULL_CONFIDENCE_THRESHOLD,
     MIN_TRAIN_SAMPLES,
-    TRAINING_WINDOW_SESSIONS,
-    RETRAIN_EVERY_K_LOGS,
+    MODEL_STORE_PATH,
+    RETRAINING_SESSION_WINDOW,
+    RETRAINING_TRIGGER_EVERY_K,
 )
 from common.logger import get_logger
-from ml.anomaly_detector import FEATURE_COLS, compute_zscore_base
+from ml.anomaly_detector import _train_model
 
 logger = get_logger(__name__)
 
-MODEL_STORE_DIR = Path("ml/model_store")
+MODEL_STORE_DIR = Path(MODEL_STORE_PATH)
 # State file tracks how many logs were seen at the last retrain
 RETRAIN_STATE_FILE = MODEL_STORE_DIR / "retrain_state.json"
 
@@ -67,7 +68,7 @@ class AnomalyTrainer:
     # Public API
     # -----------------------------------------------------------------------
 
-    def maybe_retrain(self, features_df: pd.DataFrame) -> Optional[IsolationForest]:
+    def maybe_retrain(self, features_df: pd.DataFrame) -> Optional[Pipeline]:
         """Retrain if the periodic K-log trigger fires.
 
         Call this every time new logs arrive. It tracks cumulative log counts
@@ -85,10 +86,10 @@ class AnomalyTrainer:
         logger.info(
             f"maybe_retrain: {current_count} total logs, "
             f"{logs_since_last} new since last retrain "
-            f"(trigger at K={RETRAIN_EVERY_K_LOGS})."
+            f"(trigger at K={RETRAINING_TRIGGER_EVERY_K})."
         )
 
-        if logs_since_last >= RETRAIN_EVERY_K_LOGS:
+        if logs_since_last >= RETRAINING_TRIGGER_EVERY_K:
             logger.info("Periodic retrain trigger fired.")
             model = self.retrain(features_df)
             self._logs_seen_at_last_retrain = current_count
@@ -98,7 +99,7 @@ class AnomalyTrainer:
         logger.info("No retrain needed yet.")
         return None
 
-    def retrain(self, features_df: pd.DataFrame) -> Optional[IsolationForest]:
+    def retrain(self, features_df: pd.DataFrame) -> Optional[Pipeline]:
         """Train on the sliding window (last N sessions) and persist the model.
 
         Args:
@@ -122,40 +123,21 @@ class AnomalyTrainer:
             return None
 
         # -----------------------------------------------------------------------
-        # Select features — same columns as anomaly_detector uses
-        # -----------------------------------------------------------------------
-        available_cols = [c for c in FEATURE_COLS if c in windowed_df.columns]
-        if not available_cols:
-            logger.error("No feature columns available in windowed data. Aborting retrain.")
-            return None
-
-        X = windowed_df[available_cols].fillna(0).values
-
-        # -----------------------------------------------------------------------
-        # Train
+        # Train via the shared factory so pipeline construction is not duplicated
         # -----------------------------------------------------------------------
         logger.info(
-            f"Training IsolationForest on {n_samples} samples, "
-            f"{len(available_cols)} features, contamination={CONTAMINATION}."
+            f"Training on {n_samples} samples, "
+            f"{len(IF_FEATURE_COLUMNS)} features, contamination={IF_CONTAMINATION}."
         )
-        start_time = time.time()
-        model = IsolationForest(
-            contamination=CONTAMINATION,
-            random_state=42,
-            n_estimators=100,
-            n_jobs=-1,
-        )
-        model.fit(X)
-        elapsed = time.time() - start_time
-        logger.info(f"Training complete in {elapsed:.2f}s.")
+        pipeline = _train_model(windowed_df)   # sets pipeline.n_samples_seen_
 
         # -----------------------------------------------------------------------
         # Persist model + sidecar
         # -----------------------------------------------------------------------
-        self._save_model(model, n_samples, available_cols)
-        return model
+        self._save_model(pipeline, n_samples)
+        return pipeline
 
-    def load_latest_model(self) -> Optional[IsolationForest]:
+    def load_latest_model(self) -> Optional[Pipeline]:
         """Load the most recently saved model from model_store.
 
         Returns:
@@ -172,7 +154,7 @@ class AnomalyTrainer:
         logger.info("Model loaded successfully.")
         return model
 
-    def load_model_by_timestamp(self, timestamp: str) -> IsolationForest:
+    def load_model_by_timestamp(self, timestamp: str) -> Pipeline:
         """Load a specific model version by its timestamp string.
 
         Args:
@@ -206,13 +188,21 @@ class AnomalyTrainer:
             logger.warning(
                 "session_id column not found — P1 may not have shipped it yet. "
                 f"Training on all {len(features_df)} rows instead of last "
-                f"{TRAINING_WINDOW_SESSIONS} sessions."
+                f"{RETRAINING_SESSION_WINDOW} sessions."
             )
             return features_df
 
+        # Sort sessions by their earliest timestamp so "last N" is chronological,
+        # not insertion-order (unique() does not guarantee time ordering).
+        session_order = (
+            features_df.groupby("session_id")["timestamp"]
+            .min()
+            .sort_values()
+            .index
+        )
+        ordered_sessions = session_order.tolist()
         all_sessions = features_df["session_id"].unique()
-        # Take the last N session IDs (assumes sessions are ordered by creation time)
-        window_sessions = all_sessions[-TRAINING_WINDOW_SESSIONS:]
+        window_sessions = ordered_sessions[-RETRAINING_SESSION_WINDOW:]
         windowed = features_df[features_df["session_id"].isin(window_sessions)].copy()
 
         logger.info(
@@ -223,27 +213,32 @@ class AnomalyTrainer:
 
     def _save_model(
         self,
-        model: IsolationForest,
+        pipeline: Pipeline,
         n_samples: int,
-        feature_columns: list[str],
     ) -> None:
-        """Persist model .pkl and JSON sidecar with training metadata."""
+        """Persist pipeline .pkl and JSON sidecar with training metadata.
+
+        n_samples_seen_ is already set on the pipeline object by _train_model(),
+        but is also written to the sidecar so detect() can recover it on load
+        without requiring the attribute to survive pkl round-trips.
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pkl_path = MODEL_STORE_DIR / f"isolation_forest_v{timestamp}.pkl"
         meta_path = MODEL_STORE_DIR / f"isolation_forest_v{timestamp}.json"
 
-        # Save model
-        joblib.dump(model, pkl_path)
+        # n_samples_seen_ is set by _train_model(); ensure it survives the dump
+        pipeline.n_samples_seen_ = n_samples
+        joblib.dump(pipeline, pkl_path)
         logger.info(f"Model saved to {pkl_path}.")
 
-        # Save sidecar
         metadata = {
             "timestamp": timestamp,
             "n_samples": n_samples,
-            "contamination": CONTAMINATION,
-            "feature_columns": feature_columns,
-            "w1": WEIGHT_ISOLATION,
-            "w2": WEIGHT_ZSCORE,
+            "contamination": IF_CONTAMINATION,
+            "feature_columns": IF_FEATURE_COLUMNS,
+            "isolation_weight": IF_ISOLATION_WEIGHT,
+            "zscore_weight": IF_ZSCORE_WEIGHT,
+            "cold_start_threshold": COLD_START_FULL_CONFIDENCE_THRESHOLD,
         }
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
