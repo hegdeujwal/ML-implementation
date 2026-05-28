@@ -29,6 +29,7 @@ _SCORED_PATH = "data/processed/scored_logs_df.parquet"
 _ROOT_CAUSES_PATH = "data/processed/root_causes_df.parquet"
 
 _SCORED_LOG_COLS = [
+    "log_id",
     "sequence_number",
     "final_score",
     "label",
@@ -115,7 +116,7 @@ def identify_root_causes(
         for idx, row in top_candidates.iterrows():
             root_cause_rows.append({
                 "incident_id": incident_id,
-                "root_cause_log_id": int(row["sequence_number"]),
+                "root_cause_log_id": row.get("log_id", f"log_{int(row['sequence_number']):06d}"),
                 "confidence_score": confidences[idx],
                 "in_graph": bool(row["in_graph"]),
             })
