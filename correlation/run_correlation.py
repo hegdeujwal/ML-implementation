@@ -30,12 +30,8 @@ import time
 import pandas as pd
 
 import common.config as cfg
-from correlation.centrality import build_graph_scores_df, compute_centrality
-from correlation.graph_builder import (
-    build_graph_from_parquet,
-    load_graph,
-    persist_graph,
-)
+from correlation.centrality import compute_centrality
+from correlation.graph_builder import build_graph, load_or_build_graph
 from correlation.graph_visualizer import export_graph_json
 from correlation.sequence_engine import detect_sequences
 
@@ -97,18 +93,14 @@ def run() -> None:
     _section("Step 1/5 — Build correlation graph")
     t0 = time.perf_counter()
 
-    use_cache = (not REBUILD_GRAPH) and os.path.exists(GRAPH_PICKLE_PATH)
-    if use_cache:
-        print(f"  Loading cached graph from {GRAPH_PICKLE_PATH} ...")
-        g = load_graph(GRAPH_PICKLE_PATH)
-        print(f"  Loaded: {len(g.nodes)} nodes, {len(g.edges)} edges")
-    else:
-        print(f"  Building graph from {SESSIONIZED_LOGS_PATH} ...")
-        g = build_graph_from_parquet(SESSIONIZED_LOGS_PATH)
-        persist_graph(g, GRAPH_PICKLE_PATH)
-        print(f"  Built:  {len(g.nodes)} nodes, {len(g.edges)} edges")
-        print(f"  Cached to {GRAPH_PICKLE_PATH}")
+    raw_df = pd.read_parquet(SESSIONIZED_LOGS_PATH)
 
+    if REBUILD_GRAPH and os.path.exists(GRAPH_PICKLE_PATH):
+        os.remove(GRAPH_PICKLE_PATH)
+        print("  Forced rebuild: removed cached graph.")
+
+    g = load_or_build_graph(raw_df)
+    print(f"  Graph: {len(g.nodes)} nodes, {len(g.edges)} edges")
     print(f"  Elapsed: {time.perf_counter() - t0:.2f}s")
 
     # ------------------------------------------------------------------
@@ -117,11 +109,11 @@ def run() -> None:
     _section("Step 2/5 — Compute centrality scores")
     t0 = time.perf_counter()
 
-    centrality_df = compute_centrality(g)
-    print(f"  Computed centrality for {len(centrality_df)} nodes")
+    graph_scores_df = compute_centrality(g, raw_df)
+    print(f"  Computed centrality for {len(graph_scores_df)} log rows")
     print(f"  centrality_score range: "
-          f"[{centrality_df['centrality_score'].min():.4f}, "
-          f"{centrality_df['centrality_score'].max():.4f}]")
+          f"[{graph_scores_df['centrality_score'].min():.4f}, "
+          f"{graph_scores_df['centrality_score'].max():.4f}]")
     print(f"  Elapsed: {time.perf_counter() - t0:.2f}s")
 
     # ------------------------------------------------------------------
@@ -130,12 +122,12 @@ def run() -> None:
     _section("Step 3/5 — Detect recurring sequences")
     t0 = time.perf_counter()
 
-    raw_df = pd.read_parquet(SESSIONIZED_LOGS_PATH)
     # sequence_engine expects float epoch seconds; normalise datetime if needed
-    if pd.api.types.is_datetime64_any_dtype(raw_df["timestamp"]):
-        raw_df = raw_df.copy()
-        raw_df["timestamp"] = raw_df["timestamp"].astype("int64") / 1e9
-    in_sequence_log_ids = detect_sequences(raw_df, output_path=SEQUENCES_JSON_PATH)
+    seq_df = raw_df
+    if pd.api.types.is_datetime64_any_dtype(seq_df["timestamp"]):
+        seq_df = seq_df.copy()
+        seq_df["timestamp"] = seq_df["timestamp"].astype("int64") / 1e9
+    in_sequence_log_ids = detect_sequences(seq_df, output_path=SEQUENCES_JSON_PATH)
 
     with open(SEQUENCES_JSON_PATH, "r") as fh:
         sequences = json.load(fh)
@@ -146,18 +138,16 @@ def run() -> None:
     print(f"  Elapsed: {time.perf_counter() - t0:.2f}s")
 
     # ------------------------------------------------------------------
-    # Step 4: Assemble graph_scores_df
+    # Step 4: Patch in_sequence and persist graph_scores_df
     # ------------------------------------------------------------------
-    _section("Step 4/5 — Assemble graph_scores_df.parquet")
+    _section("Step 4/5 — Patch in_sequence and save graph_scores_df.parquet")
     t0 = time.perf_counter()
 
-    graph_scores_df = build_graph_scores_df(
-        centrality_df=centrality_df,
-        raw_df=raw_df,
-        g=g,
-        sequence_log_ids=in_sequence_log_ids,
+    graph_scores_df["in_sequence"] = graph_scores_df["sequence_number"].isin(
+        in_sequence_log_ids
     )
-    graph_scores_df.to_parquet(GRAPH_SCORES_PATH, index=False)
+    from common.utils import save_parquet
+    save_parquet(graph_scores_df, GRAPH_SCORES_PATH)
 
     print(f"  Rows: {len(graph_scores_df):,}")
     print(f"  in_sequence=True: {graph_scores_df['in_sequence'].sum():,}")
@@ -171,8 +161,8 @@ def run() -> None:
     _section("Step 5/5 — Export graph JSON")
     t0 = time.perf_counter()
 
-    payload = export_graph_json(g, centrality_df, output_path=GRAPH_JSON_PATH)
-    print(f"  Nodes: {len(payload['nodes'])}, Edges: {len(payload['edges'])}")
+    export_graph_json(g, output_path=GRAPH_JSON_PATH)
+    print(f"  Graph: {len(g.nodes)} nodes, {len(g.edges)} edges")
     print(f"  Written to {GRAPH_JSON_PATH}")
     print(f"  Elapsed: {time.perf_counter() - t0:.2f}s")
 
