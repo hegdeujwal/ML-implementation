@@ -209,6 +209,11 @@ def detect(
         "model_confidence": float(confidence),
     })
 
+    # Add canonical `log_id` for downstream joins and DB writes
+    anomaly_df["log_id"] = anomaly_df["sequence_number"].apply(
+        lambda i: f"log_{int(i):06d}"
+    )
+
     null_counts = anomaly_df.isnull().sum()
     if null_counts.any():
         raise ValueError(

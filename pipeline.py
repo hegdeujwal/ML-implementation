@@ -119,11 +119,14 @@ def _step_parsing(log_file: str) -> int:
 
         # Keep only canonical columns (plus session_id for downstream feature groupby)
         canonical_cols = [
-            "sequence_number", "timestamp", "source_type", "service", "host",
+            "log_id", "sequence_number", "timestamp", "source_type", "service", "host",
             "log_level", "event_type", "event_action", "template_id",
             "frequency", "event_weight", "importance_score", "correlation_id",
             "message", "metadata", "session_id",
         ]
+        # Ensure a stable, non-null `log_id` for downstream modules and DB writes
+        df["log_id"] = df["sequence_number"].apply(lambda i: f"log_{int(i):06d}")
+
         df = df[canonical_cols]
 
         Path(SESSIONIZED_PATH).parent.mkdir(parents=True, exist_ok=True)
