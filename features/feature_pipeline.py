@@ -98,6 +98,9 @@ def run_pipeline(input_path: str) -> pd.DataFrame:
         # 7. Select output columns only
         validate_schema(df, FEATURE_COLUMNS)
         out = df[FEATURE_COLUMNS].copy()
+        out["log_id"] = out["sequence_number"].map(
+            lambda x: f"log_{int(x)}"
+        )
 
         # 8. Validate output — no nulls in required columns, no inf/NaN in floats
         for col in _NO_NULL_COLUMNS:

@@ -5,13 +5,30 @@
   },
   "mappings": {
     "properties": {
-      "log_id": { "type": "keyword" },
-      "raw_text": { "type": "text" },
-      "timestamp": { "type": "date" },
-      "label": { "type": "keyword" },
-      "final_score": { "type": "double" },
-      "incident_id": { "type": "keyword" },
-      "is_anomaly": { "type": "boolean" }
+      "log_id": {
+        "type": "keyword"
+      },
+      "timestamp": {
+        "type": "date"
+      },
+      "raw_text": {
+        "type": "text"
+      },
+      "label": {
+        "type": "keyword"
+      },
+      "final_score": {
+        "type": "float"
+      },
+      "incident_id": {
+        "type": "keyword"
+      },
+      "is_root_cause": {
+        "type": "boolean"
+      },
+      "root_cause_confidence": {
+        "type": "float"
+      }
     }
   }
 }

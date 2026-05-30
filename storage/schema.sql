@@ -116,6 +116,20 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 
 -- =========================
+-- SUMMARIES TABLE
+-- =========================
+CREATE TABLE IF NOT EXISTS summaries (
+    correlation_id TEXT PRIMARY KEY,
+    summary_text TEXT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_summaries_correlation_id
+ON summaries (correlation_id);
+
+-- =========================
 -- INDEXES (LOGS)
 -- =========================
 CREATE INDEX IF NOT EXISTS idx_logs_log_id ON logs (log_id);

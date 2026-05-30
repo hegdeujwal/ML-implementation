@@ -202,6 +202,9 @@ def detect(
     # ------------------------------------------------------------------
     anomaly_df = pd.DataFrame({
         "sequence_number":  clean["sequence_number"].values,
+        "log_id":           clean["sequence_number"].map(
+            lambda x: f"log_{int(x)}"
+        ),
         "isolation_score":  isolation_score.astype(float),
         "zscore_norm":      zscore_norm.astype(float),
         "combined_score":   combined_score.astype(float),

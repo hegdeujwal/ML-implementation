@@ -17,3 +17,6 @@ data/
 test_env_handler.py
 
 CLAUDE.md
+
+test_summary.py
+

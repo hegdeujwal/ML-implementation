@@ -32,7 +32,7 @@ _SCORED_LOG_COLS = [
     "sequence_number",
     "final_score",
     "label",
-    "correlation_id",
+    "incident_id",
     "is_root_cause",
     "root_cause_confidence",
     "is_cross_system",
@@ -47,7 +47,7 @@ def identify_root_causes(
     Parameters
     ----------
     scored_df : pd.DataFrame
-        Output of cluster_incidents(). Must contain: correlation_id,
+        Output of cluster_incidents(). Must contain: correlation_id or incident_id,
         in_graph, centrality_score, sequence_number, cluster_id,
         is_cross_system, final_score, label.
 
@@ -59,6 +59,10 @@ def identify_root_causes(
         root_causes_df : one row per root cause candidate.
     """
     df = scored_df.copy()
+    
+    # Normalize: rename correlation_id → incident_id for internal processing
+    if "correlation_id" in df.columns and "incident_id" not in df.columns:
+        df = df.rename(columns={"correlation_id": "incident_id"})
 
     # Step 1 — initialise output columns
     df["is_root_cause"] = False
@@ -67,11 +71,11 @@ def identify_root_causes(
     root_cause_rows: list[dict] = []
 
     # Step 2 — process each incident
-    valid_incidents = df["correlation_id"].dropna().unique()
+    valid_incidents = df["incident_id"].dropna().unique()
     logger.info("Processing %d incidents for root cause identification", len(valid_incidents))
 
     for incident_id in valid_incidents:
-        cluster_rows = df[df["correlation_id"] == incident_id]
+        cluster_rows = df[df["incident_id"] == incident_id]
 
         # Candidate selection: prefer in_graph=True logs
         in_graph_rows = cluster_rows[cluster_rows["in_graph"] == True]
@@ -131,7 +135,12 @@ def identify_root_causes(
 
     # Step 4 — assemble and save scored_logs_df
     # Drop temporal_proximity and all other processing-only columns
-    scored_logs_df = df[[c for c in _SCORED_LOG_COLS if c in df.columns]].copy()
+    scored_logs_df = df[["sequence_number", "final_score", "label", "incident_id", "is_root_cause", 
+                         "root_cause_confidence", "is_cross_system"]].copy()
+    
+    scored_logs_df["log_id"] = scored_logs_df["sequence_number"].map(
+        lambda x: f"log_{int(x)}"
+    )
 
     # Validate
     for col in ("sequence_number", "final_score", "label"):
@@ -146,8 +155,8 @@ def identify_root_causes(
     n_incidents = len(valid_incidents)
     n_cross = (
         int(
-            df[df["correlation_id"].notna()]
-            .groupby("correlation_id")["is_cross_system"]
+            df[df["incident_id"].notna()]
+            .groupby("incident_id")["is_cross_system"]
             .first()
             .sum()
         )
