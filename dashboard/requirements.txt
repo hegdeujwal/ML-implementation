@@ -1,0 +1,6 @@
+streamlit
+pyvis
+plotly
+psycopg2-binary
+elasticsearch
+google-generativeai

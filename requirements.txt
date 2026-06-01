@@ -1,0 +1,12 @@
+python-dotenv
+sqlalchemy
+pandas
+psycopg2-binary
+elasticsearch>=8.11.0,<9
+pytest
+scikit-learn
+numpy
+joblib
+scipy
+pyarrow
+networkx>=3.2

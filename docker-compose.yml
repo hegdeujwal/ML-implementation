@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: log_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: log_elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: log_grafana
+    ports:
+      - "3000:3000"
+
+  kibana:
+    image: kibana:8.11.0
+    container_name: log_kibana
+    ports:
+      - "5601:5601"
+  dashboard:
+    image: python:3.11-slim
+    container_name: hpe_dashboard
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: >
+      sh -c "pip install -r dashboard/requirements.txt -q &&
+             streamlit run dashboard/app.py
+             --server.port 8501 --server.address 0.0.0.0"
+    ports:
+      - "8501:8501"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - ELASTIC_URL=http://elasticsearch:9200
+    depends_on:
+      - postgres
+      - elasticsearch
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

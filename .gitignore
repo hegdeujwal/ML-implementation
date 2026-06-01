@@ -1,0 +1,26 @@
+.env
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# VS Code (optional)
+.vscode/
+
+# Data files (future)
+data/
+*.log
+*.parquet
+
+test_env_handler.py
+
+CLAUDE.md
+AGENTS.md   
+
+test_summary.py
+
+ml/model_store/*.pkl
+ml/model_store/*.json
+ml/model_store/retrain_state.json

@@ -1,0 +1,19 @@
+{
+  "timestamp": "20260601_194542",
+  "n_samples": 12019,
+  "contamination": "auto",
+  "feature_columns": [
+    "frequency_score",
+    "burstiness_score",
+    "zscore_base",
+    "time_delta_prev",
+    "time_delta_session_start",
+    "inter_arrival_rate",
+    "counter_proximity"
+  ],
+  "isolation_weight": 0.7,
+  "zscore_weight": 0.3,
+  "cold_start_threshold": 500,
+  "sklearn_version": "1.8.0",
+  "numpy_version": "2.4.4"
+}
