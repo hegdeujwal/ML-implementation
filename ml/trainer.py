@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Optional
 
 import joblib
+import numpy
 import pandas as pd
+import sklearn
 from sklearn.pipeline import Pipeline
 
 from common.config import (
@@ -140,8 +142,13 @@ class AnomalyTrainer:
     def load_latest_model(self) -> Optional[Pipeline]:
         """Load the most recently saved model from model_store.
 
+        Validates the JSON sidecar before loading to guard against sklearn
+        version mismatches and feature column drift that would corrupt scores
+        silently.
+
         Returns:
-            The deserialized IsolationForest, or None if no model exists yet.
+            The deserialized IsolationForest, or None if no model exists or
+            sidecar validation fails.
         """
         pkl_files = sorted(MODEL_STORE_DIR.glob("isolation_forest_v*.pkl"))
         if not pkl_files:
@@ -149,7 +156,19 @@ class AnomalyTrainer:
             return None
 
         latest = pkl_files[-1]   # sorted by name = sorted by timestamp
-        logger.info(f"Loading model from {latest}.")
+        sidecar = latest.with_suffix(".json")
+
+        if not sidecar.exists():
+            logger.warning(
+                "No sidecar found for %s — skipping load to avoid silent corruption.",
+                latest.name,
+            )
+            return None
+
+        if not self._validate_sidecar(sidecar):
+            return None
+
+        logger.info("Loading model from %s.", latest)
         model = joblib.load(latest)
         logger.info("Model loaded successfully.")
         return model
@@ -239,6 +258,9 @@ class AnomalyTrainer:
             "isolation_weight": IF_ISOLATION_WEIGHT,
             "zscore_weight": IF_ZSCORE_WEIGHT,
             "cold_start_threshold": COLD_START_FULL_CONFIDENCE_THRESHOLD,
+            # Version info for load-time validation
+            "sklearn_version": sklearn.__version__,
+            "numpy_version": numpy.__version__,
         }
         with open(meta_path, "w") as f:
             json.dump(metadata, f, indent=2)
@@ -255,3 +277,57 @@ class AnomalyTrainer:
             with open(RETRAIN_STATE_FILE) as f:
                 return json.load(f).get("logs_seen_at_last_retrain", 0)
         return 0
+
+    def _validate_sidecar(self, sidecar_path: Path) -> bool:
+        """Validate sidecar metadata before loading a saved model.
+
+        Checks:
+        - sklearn version matches current environment (warns on minor mismatch,
+          refuses on major mismatch)
+        - feature_columns in sidecar exactly matches IF_FEATURE_COLUMNS from config
+          (reordering or addition/removal corrupts StandardScaler silently)
+
+        Returns:
+            True if the model is safe to load, False otherwise.
+        """
+        try:
+            with open(sidecar_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read sidecar %s: %s", sidecar_path, exc)
+            return False
+
+        saved_sklearn = meta.get("sklearn_version", "unknown")
+        saved_features = meta.get("feature_columns", [])
+
+        # Feature column check — must be identical (order matters for StandardScaler)
+        if saved_features != IF_FEATURE_COLUMNS:
+            logger.warning(
+                "Model sidecar feature_columns mismatch. "
+                "Saved: %s  Current: %s. Refusing to load — retraining from scratch.",
+                saved_features,
+                IF_FEATURE_COLUMNS,
+            )
+            return False
+
+        # sklearn version check
+        saved_major = saved_sklearn.split(".")[0] if saved_sklearn != "unknown" else None
+        current_major = sklearn.__version__.split(".")[0]
+        if saved_major and saved_major != current_major:
+            logger.warning(
+                "sklearn major version mismatch: saved=%s current=%s. "
+                "Refusing to load — retraining from scratch.",
+                saved_sklearn,
+                sklearn.__version__,
+            )
+            return False
+
+        if saved_sklearn != sklearn.__version__:
+            logger.warning(
+                "sklearn minor version differs: saved=%s current=%s. "
+                "Scores may differ slightly — proceeding with load.",
+                saved_sklearn,
+                sklearn.__version__,
+            )
+
+        return True

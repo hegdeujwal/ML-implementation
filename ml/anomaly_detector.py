@@ -227,14 +227,13 @@ def detect(
         )
 
     # Print summary to stdout
-    print(f"\nShape: {anomaly_df.shape}")
-    print(f"Anomaly rate: {is_anomaly.mean():.4f}  ({int(is_anomaly.sum())} / {len(anomaly_df)})")
-    print(f"Model confidence: {confidence:.4f}")
-    print("\nTop 10 by combined_score:")
-    print(
-        anomaly_df.nlargest(10, "combined_score")[["sequence_number", "combined_score"]]
-        .to_string(index=False)
+    logger.info(f"Shape: {anomaly_df.shape}")
+    logger.info(
+        f"Anomaly rate: {is_anomaly.mean():.4f}  ({int(is_anomaly.sum())} / {len(anomaly_df)})"
     )
+    logger.info(f"Model confidence: {confidence:.4f}")
+    top10 = anomaly_df.nlargest(10, "combined_score")[["sequence_number", "combined_score"]]
+    logger.info(f"Top 10 by combined_score:\n{top10.to_string(index=False)}")
 
     return anomaly_df
 
@@ -243,20 +242,82 @@ def run(
     features_path: Path = FEATURES_PATH,
     output_path: Path = ANOMALY_OUTPUT_PATH,
 ) -> pd.DataFrame:
-    """End-to-end entry point: load → detect → save.
+    """End-to-end entry point: load -> detect (with saved model) -> retrain if needed -> save.
 
-    Called by pipeline.py. Signature must remain stable.
+    Model lifecycle (cross-run):
+    1. Load rolling feature store (last N sessions across all runs) for training.
+    2. Load + validate the latest saved IsolationForest via AnomalyTrainer.
+    3. Run detect() -- uses saved model if valid, otherwise trains fresh.
+    4. Call AnomalyTrainer.maybe_retrain() -- retrains on rolling store if K-log
+       trigger fires, persisting the new model for subsequent runs.
+
+    Falls back gracefully to fresh training on first run (cold start).
 
     Returns:
         anomaly_df for in-memory use by the next pipeline stage.
     """
-    df = load_parquet(str(features_path))
-    logger.info(f"Loaded {len(df):,} rows from {features_path}")
+    import os
+    import tempfile
 
-    anomaly_df = detect(df)
+    import joblib
+
+    import common.config as cfg
+    from ml.trainer import AnomalyTrainer
+
+    df = load_parquet(str(features_path))
+    logger.info("Loaded %d rows from %s", len(df), features_path)
+
+    trainer = AnomalyTrainer()
+
+    # Load rolling feature store for training (cross-run history)
+    rolling_path = Path(cfg.FEATURE_ROLLING_STORE_PATH)
+    if rolling_path.exists():
+        train_df = load_parquet(str(rolling_path))
+        logger.info(
+            "Loaded rolling feature store: %d rows for IF training.", len(train_df)
+        )
+    else:
+        train_df = df
+        logger.info(
+            "No rolling feature store found -- cold start, training on current batch (%d rows).",
+            len(df),
+        )
+
+    # Load latest saved model (validated against sidecar)
+    latest_pipeline = trainer.load_latest_model()
+    tmp_model_path: str | None = None
+    if latest_pipeline is not None:
+        tmp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+        tmp.close()
+        joblib.dump(latest_pipeline, tmp.name)
+        tmp_model_path = tmp.name
+        logger.info("Using validated saved model for inference.")
+    else:
+        logger.info("No valid saved model -- will train fresh for inference.")
+
+    # Detect anomalies
+    try:
+        anomaly_df = detect(df, model_path=tmp_model_path)
+    finally:
+        if tmp_model_path:
+            try:
+                os.unlink(tmp_model_path)
+            except OSError:
+                pass
+
+    # Trigger retraining if K-log threshold crossed (uses rolling store for window)
+    retrained = trainer.maybe_retrain(train_df)
+    if retrained is not None:
+        logger.info(
+            "AnomalyTrainer retrained on %d rows. New model saved to %s.",
+            len(train_df),
+            cfg.MODEL_STORE_PATH,
+        )
+    else:
+        logger.info("No retraining triggered this run.")
 
     save_parquet(anomaly_df, str(output_path))
-    logger.info(f"anomaly_df saved → {output_path} ({len(anomaly_df):,} rows)")
+    logger.info("anomaly_df saved -> %s (%d rows)", output_path, len(anomaly_df))
 
     return anomaly_df
 
