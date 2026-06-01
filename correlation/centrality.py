@@ -132,7 +132,7 @@ def compute_centrality(
 
     # Step 3 — join centrality values to log rows via template_id
     df = sessionized_logs[
-        ["sequence_number", "session_id", "template_id", "log_id"]
+        ["sequence_number", "session_id", "template_id"]
     ].copy()
 
     df["centrality_score"] = df["template_id"].map(
@@ -180,7 +180,6 @@ def compute_centrality(
 
     # Step 6 — validate, save, return
     output_cols = [
-        "log_id",
         "sequence_number", "centrality_score", "degree", "betweenness",
         "in_graph", "cluster_id", "in_sequence", "correlated_log_ids",
     ]

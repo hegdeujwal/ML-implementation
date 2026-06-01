@@ -174,7 +174,6 @@ FEATURE_ROLLING_MAX_SESSIONS: int = 50
 
 # Feature dataframe schema contract
 FEATURE_COLUMNS = [
-    "log_id",
     "sequence_number",
     "session_id",
     "template_id",

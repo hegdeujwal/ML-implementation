@@ -28,6 +28,11 @@ def burstiness_score(session_df: pd.DataFrame) -> pd.Series:
     """Fano factor (variance / mean) of inter-arrival times, clipped to [0.0, 10.0].
 
     The same scalar value is broadcast to every row in the session.
+
+    Edge cases:
+    - Fewer than 2 rows: no inter-arrivals possible, returns 0.0.
+    - Exactly 2 rows: one inter-arrival, variance is undefined (NaN), returns 0.0.
+    - Mean of inter-arrivals == 0: all events simultaneous, returns 0.0.
     """
     if len(session_df) < 2:
         return pd.Series(0.0, index=session_df.index, dtype=float)
@@ -35,11 +40,19 @@ def burstiness_score(session_df: pd.DataFrame) -> pd.Series:
     sorted_ts = session_df["timestamp"].sort_values()
     inter_arrivals = sorted_ts.diff().dt.total_seconds().dropna()
 
+    if len(inter_arrivals) < 2:
+        # Only one interval — variance is undefined, no burstiness signal.
+        return pd.Series(0.0, index=session_df.index, dtype=float)
+
     mean = inter_arrivals.mean()
     if mean == 0:
         return pd.Series(0.0, index=session_df.index, dtype=float)
 
-    fano = float(np.clip(inter_arrivals.var() / mean, 0.0, 10.0))
+    variance = inter_arrivals.var()
+    if not np.isfinite(variance):
+        return pd.Series(0.0, index=session_df.index, dtype=float)
+
+    fano = float(np.clip(variance / mean, 0.0, 10.0))
     return pd.Series(fano, index=session_df.index, dtype=float)
 
 

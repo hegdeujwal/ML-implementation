@@ -213,20 +213,12 @@ def detect(
     # ------------------------------------------------------------------
     anomaly_df = pd.DataFrame({
         "sequence_number":  clean["sequence_number"].values,
-        "log_id":           clean["sequence_number"].map(
-            lambda x: f"log_{int(x)}"
-        ),
         "isolation_score":  isolation_score.astype(float),
         "zscore_norm":      zscore_norm.astype(float),
         "combined_score":   combined_score.astype(float),
         "is_anomaly":       is_anomaly.astype(bool),
         "model_confidence": float(confidence),
     })
-
-    # Add canonical `log_id` for downstream joins and DB writes
-    anomaly_df["log_id"] = anomaly_df["sequence_number"].apply(
-        lambda i: f"log_{int(i):06d}"
-    )
 
     null_counts = anomaly_df.isnull().sum()
     if null_counts.any():
