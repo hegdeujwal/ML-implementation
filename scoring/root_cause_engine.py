@@ -119,7 +119,7 @@ def identify_root_causes(
         for idx, row in top_candidates.iterrows():
             root_cause_rows.append({
                 "incident_id": incident_id,
-                "root_cause_log_id": row.get("log_id", f"log_{int(row['sequence_number']):06d}"),
+                "root_cause_log_id": f"log_{int(row['sequence_number']):06d}",
                 "confidence_score": confidences[idx],
                 "in_graph": bool(row["in_graph"]),
             })
@@ -134,13 +134,11 @@ def identify_root_causes(
     save_parquet(root_causes_df, _ROOT_CAUSES_PATH)
 
     # Step 4 — assemble and save scored_logs_df
-    # Drop temporal_proximity and all other processing-only columns
-    scored_logs_df = df[["sequence_number", "final_score", "label", "incident_id", "is_root_cause", 
+    # Drop temporal_proximity and all other processing-only columns.
+    # Rename internal incident_id back to correlation_id (canonical schema name).
+    scored_logs_df = df[["sequence_number", "final_score", "label", "incident_id", "is_root_cause",
                          "root_cause_confidence", "is_cross_system"]].copy()
-    
-    scored_logs_df["log_id"] = scored_logs_df["sequence_number"].map(
-        lambda x: f"log_{int(x)}"
-    )
+    scored_logs_df = scored_logs_df.rename(columns={"incident_id": "correlation_id"})
 
     # Validate
     for col in ("sequence_number", "final_score", "label"):
@@ -174,7 +172,10 @@ def identify_root_causes(
         n_root,
     )
 
-    # Step 5 — return
+    # Step 5 — rename internal incident_id back to correlation_id before returning
+    # so callers can filter on correlation_id (the canonical AGENTS.md column name).
+    df = df.rename(columns={"incident_id": "correlation_id"})
+
     return df, root_causes_df
 
 
