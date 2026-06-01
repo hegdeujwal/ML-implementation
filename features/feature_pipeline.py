@@ -12,13 +12,21 @@ import pandas as pd
 
 from common.config import (
     FEATURE_COLUMNS,
+    FEATURE_ROLLING_MAX_SESSIONS,
+    FEATURE_ROLLING_STORE_PATH,
     FEATURES_OUTPUT_PATH,
     ZSCORE_BASELINE_N_SESSIONS,
+    ZSCORE_BASELINE_STORE_PATH,
 )
 from common.logger import get_logger
 from common.utils import load_parquet, save_parquet, validate_schema
 
-from features.statistical_features import log_frequency_score, burstiness_score, zscore_base
+from features.statistical_features import (
+    burstiness_score,
+    log_frequency_score,
+    update_feature_rolling_store,
+    zscore_base_persistent,
+)
 from features.temporal_features import time_delta_prev, time_delta_session_start, inter_arrival_rate
 from features.counter_proximity import compute_counter_proximity
 
@@ -71,7 +79,9 @@ def run_pipeline(input_path: str) -> pd.DataFrame:
             .apply(burstiness_score)
             .astype(float)
         )
-        df["zscore_base"] = zscore_base(df, ZSCORE_BASELINE_N_SESSIONS)
+        df["zscore_base"] = zscore_base_persistent(
+            df, ZSCORE_BASELINE_STORE_PATH
+        )
 
         # 4. Temporal features
         df["time_delta_prev"] = (
@@ -121,12 +131,30 @@ def run_pipeline(input_path: str) -> pd.DataFrame:
             f"{len(FEATURE_COLUMNS)} columns)"
         )
 
-        # 10. Print summary
-        print(f"\nShape: {out.shape}")
-        print("\nNull counts:")
-        print(out.isnull().sum().to_string())
-        print("\nSample (5 rows):")
-        print(out.head().to_string())
+        # 10. Log summary
+        logger.info(f"Shape: {out.shape}")
+        null_summary = out.isnull().sum()
+        if null_summary.any():
+            logger.warning(f"Null counts:\n{null_summary.to_string()}")
+        else:
+            logger.info("No nulls in output.")
+        logger.info(f"Sample (first row):\n{out.head(1).to_string()}")
+
+        # 10. Update rolling feature store for cross-run IF retraining.
+        # Pass the full df (has session_id + timestamp) filtered to FEATURE_COLUMNS
+        # plus session_id so AnomalyTrainer can apply the sliding-window logic.
+        store_cols = list(dict.fromkeys(["session_id", "timestamp"] + FEATURE_COLUMNS))
+        store_cols = [c for c in store_cols if c in df.columns]
+        update_feature_rolling_store(
+            df[store_cols],
+            FEATURE_ROLLING_STORE_PATH,
+            FEATURE_ROLLING_MAX_SESSIONS,
+        )
+        logger.info(
+            "Rolling feature store updated: last %d sessions retained at %s",
+            FEATURE_ROLLING_MAX_SESSIONS,
+            FEATURE_ROLLING_STORE_PATH,
+        )
 
         return out
 

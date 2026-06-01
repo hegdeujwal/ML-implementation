@@ -100,3 +100,198 @@ def zscore_base(df: pd.DataFrame, n_sessions: int) -> pd.Series:
         index=df.index,
         dtype=float,
     )
+
+
+# ---------------------------------------------------------------------------
+# Persistent z-score baseline (Welford's online algorithm)
+# ---------------------------------------------------------------------------
+
+def zscore_base_persistent(
+    df: pd.DataFrame,
+    store_path: str,
+) -> pd.Series:
+    """Cross-run rolling z-score using Welford's online algorithm.
+
+    Persists per-(host, template_id) running statistics to disk so that
+    z-scores are computed against ALL historical sessions, not only the
+    sessions present in the current batch.  This is the primary mechanism
+    for detecting slow drift across pipeline runs.
+
+    Algorithm (Welford's):
+        n    += 1
+        delta = freq - mean
+        mean += delta / n
+        M2   += delta * (freq - mean)   # uses updated mean
+        std   = sqrt(M2 / (n-1))        # sample std, defined when n >= 2
+
+    Args:
+        df:         Full sessionized DataFrame with host, session_id,
+                    template_id, frequency, and timestamp columns.
+        store_path: Path to the Welford baseline parquet.  Created on first
+                    run; updated in-place on every subsequent run.
+
+    Returns:
+        Float Series aligned to df.index, clipped to [-5.0, 5.0].
+        Returns 0.0 for groups with fewer than 2 historical observations.
+    """
+    from pathlib import Path
+    import json
+
+    store_p = Path(store_path)
+
+    # --- Load existing baseline store ---
+    if store_p.exists():
+        store = pd.read_parquet(store_p)
+        # seen_session_ids is stored as JSON string per row
+        store["_seen_ids"] = store["seen_session_ids"].apply(json.loads)
+    else:
+        store = pd.DataFrame(
+            columns=["host", "template_id", "n", "welford_mean", "welford_M2",
+                     "seen_session_ids", "_seen_ids"]
+        )
+        store["_seen_ids"] = pd.Series(dtype=object)
+
+    # Build a lookup: (host, template_id) -> row index in store
+    store = store.set_index(["host", "template_id"])
+
+    # --- Compute per-(host, session, template) frequency summary ---
+    session_starts = (
+        df.groupby(["host", "session_id"])["timestamp"]
+        .min().reset_index().rename(columns={"timestamp": "session_start"})
+    )
+    stf = (
+        df.groupby(["host", "session_id", "template_id"])["frequency"]
+        .first().reset_index()
+    )
+    stf = stf.merge(session_starts, on=["host", "session_id"])
+
+    # --- Apply Welford updates for new sessions ---
+    store_updates: dict = {}  # (host, template_id) -> updated dict
+
+    for _, row in stf.iterrows():
+        key = (row["host"], row["template_id"])
+        freq = float(row["frequency"])
+        sid = str(row["session_id"])
+
+        if key in store.index:
+            rec = store.loc[key].to_dict()
+            seen = set(rec.get("_seen_ids") or [])
+            n = float(rec["n"])
+            mean = float(rec["welford_mean"])
+            M2 = float(rec["welford_M2"])
+        else:
+            seen = set()
+            n, mean, M2 = 0.0, 0.0, 0.0
+
+        # Idempotent: skip sessions already incorporated
+        if sid in seen:
+            store_updates[key] = {"n": n, "welford_mean": mean,
+                                  "welford_M2": M2, "_seen_ids": seen}
+            continue
+
+        # Welford online update
+        n += 1.0
+        delta = freq - mean
+        mean += delta / n
+        M2 += delta * (freq - mean)
+        seen.add(sid)
+
+        store_updates[key] = {"n": n, "welford_mean": mean,
+                              "welford_M2": M2, "_seen_ids": seen}
+
+    # Merge updates back into store
+    for (host, template_id), upd in store_updates.items():
+        key = (host, template_id)
+        if key not in store.index:
+            store.loc[key, :] = None
+        store.at[key, "n"] = upd["n"]
+        store.at[key, "welford_mean"] = upd["welford_mean"]
+        store.at[key, "welford_M2"] = upd["welford_M2"]
+        store.at[key, "_seen_ids"] = upd["_seen_ids"]
+
+    # --- Compute z-scores for the current batch using post-update stats ---
+    zscore_lookup: dict = {}
+    for _, row in stf.iterrows():
+        key = (row["host"], row["template_id"])
+        sid = row["session_id"]
+        freq = float(row["frequency"])
+
+        if key in store.index:
+            n = float(store.at[key, "n"])
+            mean = float(store.at[key, "welford_mean"])
+            M2 = float(store.at[key, "welford_M2"])
+        else:
+            n, mean, M2 = 1.0, freq, 0.0
+
+        lookup_key = (row["host"], sid, row["template_id"])
+        if n < 2 or M2 <= 0.0:
+            zscore_lookup[lookup_key] = 0.0
+        else:
+            std = float(np.sqrt(M2 / (n - 1.0)))
+            if std < 1e-9:
+                zscore_lookup[lookup_key] = 0.0
+            else:
+                z = (freq - mean) / std
+                zscore_lookup[lookup_key] = float(np.clip(z, -5.0, 5.0))
+
+    # --- Persist updated store ---
+    store = store.reset_index()
+    store["seen_session_ids"] = store["_seen_ids"].apply(
+        lambda s: json.dumps(sorted(s)) if isinstance(s, set) else json.dumps([])
+    )
+    store = store.drop(columns=["_seen_ids"])
+    store_p.parent.mkdir(parents=True, exist_ok=True)
+    store.to_parquet(store_p, index=False)
+
+    # Map back to every row in df
+    keys = list(zip(df["host"], df["session_id"], df["template_id"]))
+    return pd.Series(
+        [zscore_lookup.get(k, 0.0) for k in keys],
+        index=df.index,
+        dtype=float,
+    )
+
+
+def update_feature_rolling_store(
+    features_df: pd.DataFrame,
+    store_path: str,
+    max_sessions: int,
+) -> None:
+    """Append current batch features to the rolling store for IF retraining.
+
+    Keeps only the most recent max_sessions unique sessions (by session_start
+    time) so the store does not grow unbounded.  Deduplicates by session_id
+    so re-running the pipeline on the same data is idempotent.
+
+    Args:
+        features_df: Output of feature_pipeline.run_pipeline() — must contain
+                     session_id and timestamp columns.
+        store_path:  Path to the rolling store parquet.
+        max_sessions: Maximum number of unique sessions to retain.
+    """
+    from pathlib import Path
+
+    store_p = Path(store_path)
+
+    if store_p.exists():
+        existing = pd.read_parquet(store_p)
+        combined = pd.concat([existing, features_df], ignore_index=True)
+        # Deduplicate rows by session_id — keep the latest version (from new batch)
+        combined = combined.drop_duplicates(
+            subset=["session_id", "sequence_number"], keep="last"
+        )
+    else:
+        combined = features_df.copy()
+
+    # Determine the most recent max_sessions sessions chronologically
+    session_starts = (
+        combined.groupby("session_id")["timestamp"]
+        .min()
+        .sort_values()
+    )
+    keep_sessions = session_starts.index[-max_sessions:].tolist()
+    combined = combined[combined["session_id"].isin(keep_sessions)]
+
+    store_p.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(store_p, index=False)
+
