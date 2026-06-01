@@ -2,25 +2,18 @@
 -- LOGS TABLE
 -- =========================
 CREATE TABLE IF NOT EXISTS logs (
-    log_id TEXT PRIMARY KEY,
-    sequence_number BIGINT,
+    sequence_number BIGINT PRIMARY KEY,
     timestamp TIMESTAMPTZ,
     source_type VARCHAR(100),
-
     service VARCHAR(100),
     host VARCHAR(100),
     log_level VARCHAR(50),
     event_type VARCHAR(100),
     event_action VARCHAR(100),
     template_id VARCHAR(100),
-
+    frequency INT,
+    event_weight DOUBLE PRECISION,
     message TEXT,
-    raw_text TEXT,
-
-    -- IMPORTANT: now explicit columns (not only JSONB)
-    incident_id TEXT,
-    label TEXT,
-
     metadata JSONB,
     session_id TEXT,
 
@@ -32,19 +25,19 @@ CREATE TABLE IF NOT EXISTS logs (
 -- FEATURES TABLE
 -- =========================
 CREATE TABLE IF NOT EXISTS features (
-    log_id TEXT PRIMARY KEY REFERENCES logs(log_id) ON DELETE CASCADE,
+    sequence_number BIGINT PRIMARY KEY REFERENCES logs(sequence_number) ON DELETE CASCADE,
+    session_id TEXT,
+    template_id VARCHAR(100),
+    host VARCHAR(100),
     timestamp TIMESTAMPTZ,
-    label TEXT,
-    incident_id TEXT,
-
-    frequency INT,
-    event_weight DOUBLE PRECISION,
     frequency_score DOUBLE PRECISION,
-    severity_weight DOUBLE PRECISION,
+    burstiness_score DOUBLE PRECISION,
+    zscore_base DOUBLE PRECISION,
+    time_delta_prev DOUBLE PRECISION,
+    time_delta_session_start DOUBLE PRECISION,
+    inter_arrival_rate DOUBLE PRECISION,
+    event_weight DOUBLE PRECISION,
     counter_proximity DOUBLE PRECISION,
-
-    feature_payload JSONB,
-    in_sequence BOOLEAN,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -54,16 +47,12 @@ CREATE TABLE IF NOT EXISTS features (
 -- ANOMALIES TABLE
 -- =========================
 CREATE TABLE IF NOT EXISTS anomalies (
-    log_id TEXT PRIMARY KEY REFERENCES logs(log_id) ON DELETE CASCADE,
-    incident_id TEXT,
-    timestamp TIMESTAMPTZ,
-    label TEXT,
-
+    sequence_number BIGINT PRIMARY KEY REFERENCES logs(sequence_number) ON DELETE CASCADE,
     isolation_score DOUBLE PRECISION,
-    zscore DOUBLE PRECISION,
-    anomaly_score DOUBLE PRECISION,
+    zscore_norm DOUBLE PRECISION,
+    combined_score DOUBLE PRECISION,
     is_anomaly BOOLEAN,
-    in_sequence BOOLEAN,
+    model_confidence DOUBLE PRECISION,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -73,20 +62,13 @@ CREATE TABLE IF NOT EXISTS anomalies (
 -- SCORES TABLE
 -- =========================
 CREATE TABLE IF NOT EXISTS scores (
-    log_id TEXT PRIMARY KEY REFERENCES logs(log_id) ON DELETE CASCADE,
-
-    importance_score DOUBLE PRECISION,
+    sequence_number BIGINT PRIMARY KEY REFERENCES logs(sequence_number) ON DELETE CASCADE,
     final_score DOUBLE PRECISION,
     label TEXT,
-
     correlation_id VARCHAR(100),
-    incident_id TEXT,
-
     is_root_cause BOOLEAN,
     root_cause_confidence DOUBLE PRECISION,
-    in_sequence BOOLEAN,
-
-    timestamp TIMESTAMPTZ,
+    is_cross_system BOOLEAN,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -97,18 +79,12 @@ CREATE TABLE IF NOT EXISTS scores (
 -- =========================
 CREATE TABLE IF NOT EXISTS incidents (
     incident_id TEXT PRIMARY KEY,
-
     start_time TIMESTAMPTZ,
     end_time TIMESTAMPTZ,
-
-    root_cause_log_id TEXT REFERENCES logs(log_id),
-
     severity TEXT,
     label TEXT,
-
     root_cause_confidence DOUBLE PRECISION,
     log_count INTEGER,
-
     status TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -118,47 +94,36 @@ CREATE TABLE IF NOT EXISTS incidents (
 -- =========================
 -- INDEXES (LOGS)
 -- =========================
-CREATE INDEX IF NOT EXISTS idx_logs_log_id ON logs (log_id);
-CREATE INDEX IF NOT EXISTS idx_logs_incident_id ON logs (incident_id);
+CREATE INDEX IF NOT EXISTS idx_logs_sequence_number ON logs (sequence_number);
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp);
-CREATE INDEX IF NOT EXISTS idx_logs_label ON logs (label);
-
-CREATE INDEX IF NOT EXISTS idx_logs_incident_time
-ON logs (incident_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_log_level ON logs (log_level);
+CREATE INDEX IF NOT EXISTS idx_logs_host ON logs (host);
+CREATE INDEX IF NOT EXISTS idx_logs_template_id ON logs (template_id);
 
 -- =========================
 -- INDEXES (FEATURES)
 -- =========================
-CREATE INDEX IF NOT EXISTS idx_features_log_id ON features (log_id);
-CREATE INDEX IF NOT EXISTS idx_features_incident_id ON features (incident_id);
+CREATE INDEX IF NOT EXISTS idx_features_sequence_number ON features (sequence_number);
+CREATE INDEX IF NOT EXISTS idx_features_session_id ON features (session_id);
 CREATE INDEX IF NOT EXISTS idx_features_timestamp ON features (timestamp);
-CREATE INDEX IF NOT EXISTS idx_features_label ON features (label);
-
-CREATE INDEX IF NOT EXISTS idx_features_incident_time
-ON features (incident_id, timestamp);
 
 -- =========================
 -- INDEXES (ANOMALIES)
 -- =========================
-CREATE INDEX IF NOT EXISTS idx_anomalies_log_id ON anomalies (log_id);
-CREATE INDEX IF NOT EXISTS idx_anomalies_incident_id ON anomalies (incident_id);
-CREATE INDEX IF NOT EXISTS idx_anomalies_timestamp ON anomalies (timestamp);
-CREATE INDEX IF NOT EXISTS idx_anomalies_label ON anomalies (label);
+CREATE INDEX IF NOT EXISTS idx_anomalies_sequence_number ON anomalies (sequence_number);
+CREATE INDEX IF NOT EXISTS idx_anomalies_is_anomaly ON anomalies (is_anomaly);
 
 -- =========================
 -- INDEXES (SCORES)
 -- =========================
-CREATE INDEX IF NOT EXISTS idx_scores_log_id ON scores (log_id);
-CREATE INDEX IF NOT EXISTS idx_scores_incident_id ON scores (incident_id);
-CREATE INDEX IF NOT EXISTS idx_scores_timestamp ON scores (timestamp);
+CREATE INDEX IF NOT EXISTS idx_scores_sequence_number ON scores (sequence_number);
 CREATE INDEX IF NOT EXISTS idx_scores_label ON scores (label);
-
-CREATE INDEX IF NOT EXISTS idx_scores_incident_time
-ON scores (incident_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_scores_correlation_id ON scores (correlation_id);
+CREATE INDEX IF NOT EXISTS idx_scores_is_root_cause ON scores (is_root_cause);
 
 -- =========================
 -- INDEXES (INCIDENTS)
 -- =========================
 CREATE INDEX IF NOT EXISTS idx_incidents_incident_id ON incidents (incident_id);
-CREATE INDEX IF NOT EXISTS idx_incidents_timestamp ON incidents (start_time);
+CREATE INDEX IF NOT EXISTS idx_incidents_start_time ON incidents (start_time);
 CREATE INDEX IF NOT EXISTS idx_incidents_label ON incidents (label);
