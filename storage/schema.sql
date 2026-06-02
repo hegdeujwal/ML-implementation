@@ -141,3 +141,48 @@ CREATE INDEX IF NOT EXISTS idx_scores_is_root_cause ON scores (is_root_cause);
 CREATE INDEX IF NOT EXISTS idx_incidents_incident_id ON incidents (incident_id);
 CREATE INDEX IF NOT EXISTS idx_incidents_start_time ON incidents (start_time);
 CREATE INDEX IF NOT EXISTS idx_incidents_label ON incidents (label);
+
+-- =========================
+-- SCORES TABLE — chain columns (P5.5)
+-- Added via ALTER so existing databases are upgraded safely.
+-- =========================
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS chain_id TEXT;
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS precursor_incident_id TEXT;
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS chain_position INT;
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS chain_confidence DOUBLE PRECISION;
+ALTER TABLE scores ADD COLUMN IF NOT EXISTS is_precursor_elevated BOOLEAN DEFAULT FALSE;
+
+-- =========================
+-- INCIDENT HISTORY TABLE (P5.5)
+-- One row per incident per pipeline run.  Globally unique incident_id uses
+-- format INC-<YYYYMMDD>-<seq> to avoid collisions across runs.
+-- =========================
+CREATE TABLE IF NOT EXISTS incident_history (
+    incident_id              TEXT PRIMARY KEY,
+    run_date                 DATE NOT NULL,
+    run_timestamp            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    start_time               TIMESTAMPTZ,
+    end_time                 TIMESTAMPTZ,
+    template_fingerprint     TEXT NOT NULL,
+    root_cause_templates     TEXT,
+    severity                 TEXT,
+    log_count                INT,
+    hosts                    TEXT,
+    is_cross_system          BOOLEAN DEFAULT FALSE,
+    chain_id                 TEXT,
+    precursor_incident_id    TEXT,
+    chain_position           INT,
+    is_precursor_elevated    BOOLEAN DEFAULT FALSE,
+
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_history_incident_id
+    ON incident_history (incident_id);
+CREATE INDEX IF NOT EXISTS idx_incident_history_end_time
+    ON incident_history (end_time);
+CREATE INDEX IF NOT EXISTS idx_incident_history_chain_id
+    ON incident_history (chain_id);
+CREATE INDEX IF NOT EXISTS idx_incident_history_run_date
+    ON incident_history (run_date);

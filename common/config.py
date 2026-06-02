@@ -299,3 +299,31 @@ ROOT_CAUSE_TOP_N: int = 3
 # filled with the column mean of the non-null rows. Boolean columns
 # (is_anomaly, in_graph, in_sequence) are always filled with False.
 MISSING_INPUT_FILL: str = "mean"
+
+# ---------------------------------------------------------------------------
+# Phase 5.5 — Cross-Run Incident Correlation
+# ---------------------------------------------------------------------------
+
+# Master switch: set False to skip P5.5 entirely (no history written or read).
+CROSS_RUN_ENABLED: bool = True
+
+# How far back (hours) to search the incident history for potential precursors.
+# 72h = 3 days covers weekend-to-Monday drift and slow-burn memory leaks.
+CROSS_RUN_LOOKBACK_HOURS: int = 72
+
+# Jaccard similarity threshold for declaring two incidents "related".
+# 0.3 = at least 30% of the combined template vocabulary must be shared.
+# Intentionally low: precursors typically share a subset, not all, templates.
+CROSS_RUN_SIMILARITY_THRESHOLD: float = 0.3
+
+# Score boost applied to precursor logs when a descendant critical incident
+# is discovered. Capped to [0, 1] after application.
+# elevated_score = min(1.0, original_score + PRECURSOR_BOOST * chain_confidence)
+PRECURSOR_BOOST: float = 0.15
+
+# Prefix for generated chain IDs (format: CHAIN-<unix_ts>-<seq>).
+CHAIN_ID_PREFIX: str = "CHAIN"
+
+# Parquet-based fallback store for incident history.
+# Used in dry-run mode (no Postgres) and synced to the DB on live runs.
+INCIDENT_HISTORY_PATH: str = "data/processed/incident_history.parquet"

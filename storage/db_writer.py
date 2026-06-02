@@ -92,6 +92,7 @@ _TABLE_KEY_MAP: dict = {
     "anomalies": "sequence_number",
     "scores": "sequence_number",
     "incidents": "incident_id",
+    "incident_history": "incident_id",
 }
 
 
@@ -208,6 +209,44 @@ def write_scores(df, conn=None):
 
 def write_incidents(df, conn=None):
     return write_dataframe(df, "incidents", conn)
+
+
+def write_incident_history(df, conn=None):
+    """Upsert incident_history rows (keyed on incident_id)."""
+    return write_dataframe(df, "incident_history", conn)
+
+
+def query_incident_history(
+    lookback_hours: int = 72,
+    conn=None,
+) -> "pd.DataFrame":
+    """Fetch recent incident_history rows from Postgres.
+
+    Falls back to an empty DataFrame if the table does not exist yet.
+    """
+    import pandas as _pd
+
+    owned_conn = conn is None
+    conn = get_connection(conn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM incident_history
+                WHERE end_time >= NOW() - INTERVAL '%s hours'
+                ORDER BY end_time DESC
+                """,
+                (lookback_hours,),
+            )
+            rows = cur.fetchall()
+            cols = [desc[0] for desc in cur.description]
+        return _pd.DataFrame(rows, columns=cols)
+    except Exception:
+        return _pd.DataFrame()
+    finally:
+        if owned_conn:
+            conn.close()
 
 
 # =====================================
