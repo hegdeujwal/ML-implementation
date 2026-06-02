@@ -120,7 +120,9 @@ def assign_chains(
         for _, h_row in recent_hist.iterrows():
             h_fp = fingerprint_from_list(h_row["template_fingerprint"])
             overlap = overlap_coefficient(curr_fp, h_fp)
-            if overlap >= threshold:
+            jacc = jaccard(curr_fp, h_fp)
+            
+            if overlap >= threshold and jacc >= getattr(cfg, "CROSS_RUN_MIN_JACCARD", 0.05):
                 matches.append({
                     "incident_id": h_row["incident_id"],
                     "chain_id": h_row.get("chain_id"),

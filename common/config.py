@@ -317,6 +317,11 @@ CROSS_RUN_LOOKBACK_HOURS: int = 72
 # Intentionally low: precursors typically share a subset, not all, templates.
 CROSS_RUN_SIMILARITY_THRESHOLD: float = 0.3
 
+# Minimum Jaccard similarity floor. Even if overlap_coefficient is high,
+# the link is rejected if Jaccard similarity is below this floor.
+# Prevents a 1-template incident from linking to a 100-template incident.
+CROSS_RUN_MIN_JACCARD: float = 0.05
+
 # Score boost applied to precursor logs when a descendant critical incident
 # is discovered. Capped to [0, 1] after application.
 # elevated_score = min(1.0, original_score + PRECURSOR_BOOST * chain_confidence)
