@@ -305,8 +305,8 @@ def run(
             except OSError:
                 pass
 
-    # Trigger retraining if K-log threshold crossed (uses rolling store for window)
-    retrained = trainer.maybe_retrain(train_df)
+    # Retrain model if the periodic K-log trigger fires
+    retrained = trainer.maybe_retrain(train_df, new_logs_count=len(df))
     if retrained is not None:
         logger.info(
             "AnomalyTrainer retrained on %d rows. New model saved to %s.",

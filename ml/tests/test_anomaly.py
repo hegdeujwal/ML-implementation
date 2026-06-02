@@ -406,8 +406,8 @@ class TestTrainerMaybeRetrain:
         with patch("ml.trainer.MODEL_STORE_DIR", tmp_model_dir), \
              patch("ml.trainer.RETRAIN_STATE_FILE", tmp_model_dir / "state.json"):
             trainer = AnomalyTrainer()
-            trainer._logs_seen_at_last_retrain = 0
-            result = trainer.maybe_retrain(small_df)
+            trainer._unprocessed_logs_count = 0
+            result = trainer.maybe_retrain(small_df, new_logs_count=len(small_df))
 
         assert result is None, "maybe_retrain should return None below K threshold"
         pkls = list(tmp_model_dir.glob("isolation_forest_v*.pkl"))
@@ -421,8 +421,8 @@ class TestTrainerMaybeRetrain:
         with patch("ml.trainer.MODEL_STORE_DIR", tmp_model_dir), \
              patch("ml.trainer.RETRAIN_STATE_FILE", tmp_model_dir / "state.json"):
             trainer = AnomalyTrainer()
-            trainer._logs_seen_at_last_retrain = 0
-            result = trainer.maybe_retrain(big_df)
+            trainer._unprocessed_logs_count = 0
+            result = trainer.maybe_retrain(big_df, new_logs_count=n)
 
         assert result is not None, "maybe_retrain should return a pipeline at K threshold"
         pkls = list(tmp_model_dir.glob("isolation_forest_v*.pkl"))

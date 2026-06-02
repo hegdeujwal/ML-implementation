@@ -10,6 +10,7 @@ Execution order
   3. anomaly       ml/anomaly_detector.py        -> data/processed/anomaly_df.parquet
   4. correlation   correlation/run_correlation.py -> data/processed/graph_scores_df.parquet
   5. scoring       scoring/importance_scorer.py  -> data/processed/scored_logs_df.parquet
+  5.5. cross_run  correlation/cross_run.py       -> data/processed/incident_history.parquet
   6. storage       storage/db_writer.py          -> Postgres (skipped in --dry-run)
 
 Usage
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 from common.logger import get_logger
+import common.config as cfg
 
 logger = get_logger(__name__)
 
@@ -50,7 +52,7 @@ logger = get_logger(__name__)
 # Step ordering
 # ---------------------------------------------------------------------------
 
-STEPS = ["parsing", "features", "anomaly", "correlation", "scoring", "storage"]
+STEPS = ["parsing", "features", "anomaly", "correlation", "scoring", "cross_run", "storage"]
 
 # ---------------------------------------------------------------------------
 # Output paths
@@ -153,6 +155,20 @@ def _step_scoring() -> int:
     return len(df)
 
 
+def _step_cross_run(dry_run: bool) -> int:
+    """Run the cross-run incident correlation step (P5.5).
+
+    Reads scored_logs_df.parquet and incident_history.parquet (if it exists),
+    matches incidents via Jaccard fingerprint similarity, assigns chain IDs,
+    elevates precursor scores, and writes enriched parquets.
+
+    In dry-run mode the incident history is parquet-only (no Postgres I/O).
+    """
+    from correlation.cross_run import run as cross_run
+    scored_df, _ = cross_run(dry_run=dry_run)
+    return len(scored_df)
+
+
 def _step_storage(dry_run: bool) -> int:
     """Write all parquets to Postgres (skipped in dry-run mode)."""
     if dry_run:
@@ -242,6 +258,7 @@ def _run_step(
         "anomaly":     _step_anomaly,
         "correlation": _step_correlation,
         "scoring":     _step_scoring,
+        "cross_run":   lambda: _step_cross_run(dry_run),
         "storage":     lambda: _step_storage(dry_run),
     }
     return dispatch[step]()
@@ -314,11 +331,12 @@ def run_pipeline(
 def _print_output_summary() -> None:
     """Log a summary of output files produced."""
     outputs = [
-        ("sessionized_logs", SESSIONIZED_PATH),
-        ("features_df", FEATURES_PATH),
-        ("anomaly_df", ANOMALY_PATH),
-        ("graph_scores_df", GRAPH_SCORES_PATH),
-        ("scored_logs_df", SCORED_LOGS_PATH),
+        ("sessionized_logs",   SESSIONIZED_PATH),
+        ("features_df",        FEATURES_PATH),
+        ("anomaly_df",         ANOMALY_PATH),
+        ("graph_scores_df",    GRAPH_SCORES_PATH),
+        ("scored_logs_df",     SCORED_LOGS_PATH),
+        ("incident_history",   cfg.INCIDENT_HISTORY_PATH),
     ]
     logger.info("Output files:")
     for name, path in outputs:

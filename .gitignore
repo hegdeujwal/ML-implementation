@@ -24,3 +24,6 @@ test_summary.py
 ml/model_store/*.pkl
 ml/model_store/*.json
 ml/model_store/retrain_state.json
+
+.claude
+docs/

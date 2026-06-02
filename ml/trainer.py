@@ -64,40 +64,43 @@ class AnomalyTrainer:
 
     def __init__(self) -> None:
         MODEL_STORE_DIR.mkdir(parents=True, exist_ok=True)
-        self._logs_seen_at_last_retrain = self._load_retrain_state()
+        self._unprocessed_logs_count = self._load_retrain_state()
 
     # -----------------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------------
 
-    def maybe_retrain(self, features_df: pd.DataFrame) -> Optional[Pipeline]:
+    def maybe_retrain(
+        self, features_df: pd.DataFrame, new_logs_count: int = 0
+    ) -> Optional[Pipeline]:
         """Retrain if the periodic K-log trigger fires.
 
         Call this every time new logs arrive. It tracks cumulative log counts
         and only triggers a full retrain when the delta exceeds K.
 
         Args:
-            features_df: Current full features DataFrame (all logs seen so far).
+            features_df: Rolling features DataFrame (last N sessions).
+            new_logs_count: Number of new logs ingested in this pipeline run.
 
         Returns:
             The newly trained IsolationForest if retrain happened, else None.
         """
-        current_count = len(features_df)
-        logs_since_last = current_count - self._logs_seen_at_last_retrain
+        self._unprocessed_logs_count += new_logs_count
 
         logger.info(
-            f"maybe_retrain: {current_count} total logs, "
-            f"{logs_since_last} new since last retrain "
+            f"maybe_retrain: {len(features_df)} rolling logs, "
+            f"{self._unprocessed_logs_count} new since last retrain "
             f"(trigger at K={RETRAINING_TRIGGER_EVERY_K})."
         )
 
-        if logs_since_last >= RETRAINING_TRIGGER_EVERY_K:
+        if self._unprocessed_logs_count >= RETRAINING_TRIGGER_EVERY_K:
             logger.info("Periodic retrain trigger fired.")
             model = self.retrain(features_df)
-            self._logs_seen_at_last_retrain = current_count
-            self._save_retrain_state(current_count)
+            self._unprocessed_logs_count = 0
+            self._save_retrain_state(0)
             return model
 
+        self._save_retrain_state(self._unprocessed_logs_count)
         logger.info("No retrain needed yet.")
         return None
 
@@ -266,16 +269,17 @@ class AnomalyTrainer:
             json.dump(metadata, f, indent=2)
         logger.info(f"Metadata sidecar saved to {meta_path}.")
 
-    def _save_retrain_state(self, log_count: int) -> None:
-        """Persist the log count at last retrain so it survives process restarts."""
+    def _save_retrain_state(self, count: int) -> None:
+        """Persist the unprocessed log count so it survives process restarts."""
         with open(RETRAIN_STATE_FILE, "w") as f:
-            json.dump({"logs_seen_at_last_retrain": log_count}, f)
+            json.dump({"unprocessed_logs_count": count}, f)
 
     def _load_retrain_state(self) -> int:
         """Load persisted retrain state, or return 0 if no state exists yet."""
         if RETRAIN_STATE_FILE.exists():
             with open(RETRAIN_STATE_FILE) as f:
-                return json.load(f).get("logs_seen_at_last_retrain", 0)
+                data = json.load(f)
+                return data.get("unprocessed_logs_count") or data.get("logs_seen_at_last_retrain", 0)
         return 0
 
     def _validate_sidecar(self, sidecar_path: Path) -> bool:
