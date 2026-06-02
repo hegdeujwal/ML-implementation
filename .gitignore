@@ -26,3 +26,4 @@ ml/model_store/*.json
 ml/model_store/retrain_state.json
 
 .claude
+docs/
