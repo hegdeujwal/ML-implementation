@@ -85,7 +85,9 @@ _TS_PATTERNS = [
         r"^\[(?P<ts>[^\]]+)\]\s+(?P<rest>.+)$"
     ),
 ]
-
+_KV_EVENT_RE = re.compile(
+    r".*timestamp_ms=(?P<ts>\d{10,13}).*"
+)
 def _parse_timestamp(ts_str: str) -> Optional[datetime]:
 
     ts_str = ts_str.strip()
@@ -216,7 +218,30 @@ def normalize_line(line: str) -> Optional[dict]:
             if ts_dt:
                 rest = tm.group("rest").strip()
                 break
+    # --------------------------------------------------
+# Fallback: key=value telemetry events
+# Example:
+# event_id=3001 | port=gigabit_1 | timestamp_ms=1686384930234
+# --------------------------------------------------
 
+    if ts_dt is None:
+        kv_match = _KV_EVENT_RE.match(line_body)
+
+        if kv_match:
+            try:
+                ts_ms = int(kv_match.group("ts"))
+
+                return {
+                    "raw_text": line,
+                    "timestamp": datetime.fromtimestamp(ts_ms / 1000),
+                    "host": "telemetry_event",
+                    "service": "EVENT",
+                    "log_level": _infer_severity(line_body, pri_severity),
+                    "message": line_body,
+                }
+
+            except Exception:
+                pass
     if ts_dt is None:
         logger.warning(f"Unparseable timestamp — skipping line: {line!r}")
         return None
