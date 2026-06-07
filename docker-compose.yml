@@ -40,7 +40,7 @@ services:
     volumes:
       - .:/app
     command: >
-      sh -c "pip install -r dashboard/requirements.txt -q &&
+      sh -c "pip install --default-timeout=100 -r requirements.txt -r dashboard/requirements.txt -q &&
              streamlit run dashboard/app.py
              --server.port 8501 --server.address 0.0.0.0"
     ports:

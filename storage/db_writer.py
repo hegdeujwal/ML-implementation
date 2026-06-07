@@ -311,8 +311,8 @@ def load_pipeline_outputs():
         )
         
         # Handle both correlation_id (old) and incident_id (new)
-        if "correlation_id" in scores_df.columns and "incident_id" not in scores_df.columns:
-            scores_df = scores_df.rename(columns={"correlation_id": "incident_id"})
+        if "incident_id" in scores_df.columns and "correlation_id" not in scores_df.columns:
+            scores_df = scores_df.rename(columns={"incident_id": "correlation_id"})
 
         write_scores(scores_df, conn)
 

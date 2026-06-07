@@ -136,16 +136,40 @@ Cross-system: {ctx['is_cross_system']}
 """
 
     prompt = f"""You are a network operations assistant for HPE CX network switches.
-For each incident below, write a 3-5 sentence plain English summary for a
-network engineer. Identify the failure pattern by name if recognisable (e.g. STP loop,
-OSPF flap, BGP reconvergence, interface CRC errors, CPU spike, memory exhaustion).
-No jargon. No bullet points. Be specific about the impact and likely root cause.
 
-Return ONLY a valid JSON array — no markdown, no explanation, no preamble:
-[{{"correlation_id": "INC-0001", "summary_text": "..."}}, ...]
+Your task is to summarize incidents for network engineers.
+
+IMPORTANT RULES:
+
+* Use ONLY the information explicitly provided in the incident data.
+* Never invent hosts, timestamps, root causes, failure patterns, impacts, or remediation steps.
+* Never assume a failure pattern unless it is clearly supported by the template sequence or root-cause information.
+* If there is insufficient evidence, explicitly state that the available data is insufficient to determine the failure pattern or root cause.
+* If log_count is 0, state that no logs are associated with the incident and that a meaningful root-cause analysis cannot be performed.
+* If root causes are listed as "none identified", state that no root cause candidate has been identified.
+* If template information is missing, state that no template sequence is available.
+* Do not exaggerate severity or impact.
+* Do not mention technologies (OSPF, BGP, STP, etc.) unless they are clearly indicated by the provided data.
+* No markdown.
+* No bullet points.
+* Write 3-5 concise sentences.
+* Be factual and conservative.
+
+Return ONLY a valid JSON array.
+No markdown, explanations, code blocks, or extra text.
+
+Format:
+[
+{
+"correlation_id": "INC-0001",
+"summary_text": "..."
+}
+]
 
 Incidents:
-{incidents_text}"""
+{incidents_text}
+"""
+
 
     try:
         response = model.generate_content(prompt)
@@ -208,7 +232,7 @@ def generate_all_summaries(
     Writes all new summaries via write_summaries_batch() — single transaction.
     batch_size=20 is safe for Gemini 2.5 Flash; do not exceed 30.
     """
-    from data.db import get_summary, write_summaries_batch
+    from dashboard.data.db import get_summary, write_summaries_batch
 
     if "correlation_id" not in scored_df.columns:
         logger.warning("scored_df has no correlation_id column — skipping summary generation")
@@ -254,7 +278,7 @@ def regenerate_summary(correlation_id: str, incident_data: dict) -> str:
     Bypass cache, call Gemini, write new text back to summaries table.
     Called only from the dashboard Regenerate button.
     """
-    from data.db import write_summary
+    from dashboard.data.db import write_summary
 
     model = _get_model()
     if model is None:
