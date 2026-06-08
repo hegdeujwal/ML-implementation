@@ -179,9 +179,10 @@ def _step_storage(dry_run: bool) -> int:
     from storage.db_writer import (
         apply_schema,
         get_connection,
-        write_logs,
-        write_features,
         write_anomalies,
+        write_features,
+        write_incidents,
+        write_logs,
         write_scores,
     )
 
@@ -206,6 +207,50 @@ def _step_storage(dry_run: bool) -> int:
         if Path(SCORED_LOGS_PATH).exists():
             scored_df = pd.read_parquet(SCORED_LOGS_PATH)
             counts["scores"] = write_scores(scored_df, conn)
+
+            # Populate incident rows used by the dashboard feed/detail pages.
+            if Path("data/processed/root_causes_df.parquet").exists():
+                rc_df = pd.read_parquet("data/processed/root_causes_df.parquet")
+                logs_df = pd.read_parquet(SESSIONIZED_PATH)
+                scores_with_ts = scored_df.merge(
+                    logs_df[["sequence_number", "timestamp"]],
+                    on="sequence_number",
+                    how="left",
+                )
+                incidents_df = (
+                    scores_with_ts.groupby("correlation_id")
+                    .agg(
+                        start_time=("timestamp", "min"),
+                        end_time=("timestamp", "max"),
+                        log_count=("sequence_number", "count"),
+                        label=("label", "max"),
+                    )
+                    .reset_index()
+                )
+                incidents_df["severity"] = incidents_df["label"]
+                incidents_df["status"] = "open"
+
+                rc_best = rc_df.sort_values("confidence_score", ascending=False).drop_duplicates("incident_id")
+                incidents_df = incidents_df.merge(
+                    rc_best,
+                    left_on="correlation_id",
+                    right_on="incident_id",
+                    how="left",
+                )
+                incidents_df = incidents_df.rename(columns={"confidence_score": "root_cause_confidence"})
+                def _normalize_root_cause_log_id(value):
+                    if pd.isna(value):
+                        return None
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if text.startswith("log_"):
+                            return text
+                        return f"log_{int(float(text)):06d}"
+                    return f"log_{int(value):06d}"
+
+                incidents_df["root_cause_log_id"] = incidents_df["root_cause_log_id"].apply(_normalize_root_cause_log_id)
+                counts["incidents"] = write_incidents(incidents_df, conn)
+
         if not dry_run and Path(SCORED_LOGS_PATH).exists():
             try:
                 import pandas as _pd

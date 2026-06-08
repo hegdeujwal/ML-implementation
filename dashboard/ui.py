@@ -151,16 +151,22 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
 }
 
 /* ── Buttons ──────────────────────────────── */
+.stButton {
+    margin-top: 0.15rem;
+    margin-bottom: 0.15rem;
+}
 .stButton > button {
     border-radius: 8px;
     font-size: 0.83rem;
     font-weight: 600;
-    padding: 0.4rem 1.1rem;
+    padding: 0.45rem 1.1rem;
+    min-height: 2.45rem;
     border: 1px solid #e2e8f0;
     background: #ffffff;
     color: #374151;
     transition: all 0.15s ease;
     letter-spacing: 0.01em;
+    width: 100%;
 }
 .stButton > button:hover {
     background: #f1f5f9;
@@ -264,6 +270,63 @@ hr {
     font-size: 0.85rem !important;
     font-weight: 600 !important;
     letter-spacing: 0.01em;
+}
+
+/* ── Premium Custom Cards ─────────────────── */
+.kpi-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 1.1rem;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 8px rgba(0,0,0,0.03);
+    transition: all 0.2s ease;
+    text-align: left;
+}
+.kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.08);
+    border-color: #cbd5e1;
+}
+.kpi-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+.kpi-value {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #0f172a;
+    margin-top: 4px;
+}
+
+.incident-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 0.75rem;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.incident-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+    border-color: #cbd5e1;
+}
+.incident-card-critical {
+    border-left: 5px solid #DC2626 !important;
+}
+.incident-card-medium {
+    border-left: 5px solid #F59E0B !important;
+}
+.incident-card-low {
+    border-left: 5px solid #22C55E !important;
+}
+.incident-card-ignore {
+    border-left: 5px solid #94A3B8 !important;
 }
 </style>
 """

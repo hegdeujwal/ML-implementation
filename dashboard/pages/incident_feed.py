@@ -10,6 +10,7 @@ metric tiles, and per-card previews of the LLM summary.
 import sys
 from pathlib import Path
 
+# ── sys.path bootstrap ──────────────────────────────────────────────────────
 _DASHBOARD_DIR = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT  = _DASHBOARD_DIR.parent
 for _p in [str(_PROJECT_ROOT), str(_DASHBOARD_DIR)]:
@@ -17,10 +18,9 @@ for _p in [str(_PROJECT_ROOT), str(_DASHBOARD_DIR)]:
         sys.path.insert(0, _p)
 
 import streamlit as st
-
 from data import db
 from ui import apply_theme, render_time_window
-from components.severity_badge import severity_badge, severity_dot
+from components.severity_badge import severity_badge
 
 st.set_page_config(
     page_title="Incident Feed · HPE CX",
@@ -33,7 +33,7 @@ apply_theme()
 # ── Sidebar filters ───────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(
-        "<div style='font-size:0.72rem; font-weight:700; text-transform:uppercase; "
+        "<div style='font-size:0.75rem; font-weight:700; text-transform:uppercase; "
         "letter-spacing:0.08em; color:#64748b; padding-bottom:0.4rem;'>Filters</div>",
         unsafe_allow_html=True,
     )
@@ -99,13 +99,27 @@ for inc in incidents:
     affected_hosts[h] = affected_hosts.get(h, 0) + 1
 most_affected = max(affected_hosts, key=affected_hosts.get) if affected_hosts else "—"
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Incidents", total)
-col2.metric("Critical", critical_count, delta=None)
-col3.metric("Cross-system", cross_count)
-col4.metric("Most Affected Host", most_affected)
-
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+# Premium custom KPI cards
+st.markdown(f"""
+<div style="display: flex; gap: 1rem; width: 100%; margin-bottom: 1.5rem; flex-wrap: wrap;">
+  <div class="kpi-card" style="flex: 1; min-width: 200px;">
+    <div class="kpi-title">Total Incidents</div>
+    <div class="kpi-value">{total}</div>
+  </div>
+  <div class="kpi-card" style="flex: 1; min-width: 200px;">
+    <div class="kpi-title" style="color: #dc2626;">Critical Incidents</div>
+    <div class="kpi-value" style="color: #dc2626;">{critical_count}</div>
+  </div>
+  <div class="kpi-card" style="flex: 1; min-width: 200px;">
+    <div class="kpi-title">Cross-System</div>
+    <div class="kpi-value">{cross_count}</div>
+  </div>
+  <div class="kpi-card" style="flex: 1; min-width: 200px;">
+    <div class="kpi-title">Most Affected Host</div>
+    <div class="kpi-value" style="font-size: 1.25rem; font-weight: 700; padding-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{most_affected}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ── Empty state ────────────────────────────────────────────────────────────
 if not incidents:
@@ -127,8 +141,8 @@ if not incidents:
 # ── Section label ──────────────────────────────────────────────────────────
 st.markdown(
     f"<div style='font-size:0.78rem; font-weight:600; color:#64748b; "
-    f"text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.6rem;'>"
-    f"{total} incident{'s' if total != 1 else ''}</div>",
+    f"text-transform:uppercase; letter-spacing:0.06em; margin-bottom:0.8rem;'>"
+    f"Showing {total} incident{'s' if total != 1 else ''}</div>",
     unsafe_allow_html=True,
 )
 
@@ -143,19 +157,28 @@ for incident in incidents_sorted:
     label = (incident.get("label") or "ignore").lower()
     host = incident.get("host", "—")
     start = incident.get("start_time")
+    end = incident.get("end_time")
     log_count = incident.get("log_count", 0)
     duration = incident.get("duration", 0)
     is_cross = incident.get("is_cross_system", False)
+    final_score = incident.get("final_score", 0.0)
+    rc_conf = incident.get("root_cause_confidence", 0.0)
 
-    # Format timestamp
-    start_str = ""
+    # Format timestamps
+    start_str = "—"
+    end_str = "—"
     if start:
         try:
             import pandas as pd
-            ts = pd.to_datetime(start)
-            start_str = ts.strftime("%d %b %Y, %H:%M")
+            start_str = pd.to_datetime(start).strftime("%d %b %Y, %H:%M")
         except Exception:
             start_str = str(start)[:16]
+    if end:
+        try:
+            import pandas as pd
+            end_str = pd.to_datetime(end).strftime("%H:%M")
+        except Exception:
+            end_str = str(end)[:16]
 
     # Duration string
     if duration and duration > 0:
@@ -168,70 +191,48 @@ for incident in incidents_sorted:
     else:
         dur_str = "—"
 
-    # Left accent colour
-    accent = {"critical": "#DC2626", "medium": "#F59E0B", "low": "#22C55E"}.get(label, "#94A3B8")
+    # LLM summary preview — reads cache, no API call
+    summary = db.get_summary(cid) or ""
+    if summary:
+        summary_preview = summary[:180] + ("…" if len(summary) > 180 else "")
+    else:
+        summary_preview = "No summary cached for this incident."
 
-    with st.container(border=True):
-        # Card header row
-        col_badge, col_info, col_actions = st.columns([1.5, 7, 1.5])
-
-        with col_badge:
-            st.markdown(
-                f"<div style='padding-top:4px;'>{severity_badge(label)}</div>",
-                unsafe_allow_html=True,
-            )
-            if is_cross:
-                st.markdown(
-                    "<div style='margin-top:5px;'>"
-                    "<span class='cross-system-badge'>⚠ CROSS-SYS</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-        with col_info:
-            # ID + host row
-            st.markdown(
-                f"<div style='display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;'>"
-                f"<span style='font-family:\"IBM Plex Mono\",monospace; font-weight:700; "
-                f"font-size:0.92rem; color:#0f172a;'>{cid}</span>"
-                f"<span style='color:#94a3b8; font-size:0.8rem;'>·</span>"
-                f"<span style='font-size:0.82rem; color:#475569; font-weight:500;'>{host}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            # Meta row
-            st.markdown(
-                f"<div style='font-size:0.78rem; color:#94a3b8; margin-top:3px; "
-                f"font-family:\"IBM Plex Mono\",monospace;'>"
-                f"{start_str} &nbsp;·&nbsp; {log_count:,} logs &nbsp;·&nbsp; {dur_str}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            # LLM summary preview — reads cache, no API call
-            summary = db.get_summary(cid) or ""
-            if summary:
-                preview = summary[:130] + ("…" if len(summary) > 130 else "")
-                st.markdown(
-                    f"<div style='font-size:0.82rem; color:#475569; margin-top:6px; "
-                    f"line-height:1.5; font-style:italic;'>{preview}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    "<div style='font-size:0.78rem; color:#cbd5e1; margin-top:4px; "
-                    "font-style:italic;'>No summary cached — run pipeline to generate.</div>",
-                    unsafe_allow_html=True,
-                )
-
-        with col_actions:
-            if st.button(
-                "View →",
-                key=f"view_{cid}",
-                type="primary",
-                use_container_width=True,
-            ):
+    # Horizontal row container
+    with st.container():
+        col_card, col_btn = st.columns([8.5, 1.5], vertical_alignment="top")
+        with col_card:
+            st.markdown(f"""
+            <div class="incident-card incident-card-{label}">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        {severity_badge(label)}
+                        <span style="font-family:'IBM Plex Mono',monospace; font-weight:700; font-size:0.95rem; color:#0f172a;">{cid}</span>
+                        {f"<span class='cross-system-badge'>⚠ CROSS-SYS</span>" if is_cross else ""}
+                    </div>
+                    <div style="font-family:'IBM Plex Mono',monospace; font-size:0.78rem; color:#64748b;">
+                        ⏱️ {dur_str} &nbsp;·&nbsp; 📋 {log_count:,} events
+                    </div>
+                </div>
+                <div style="margin-top:6px; font-size:0.8rem; color:#475569; font-family:'IBM Plex Mono',monospace;">
+                    📅 {start_str} → {end_str} &nbsp;·&nbsp; 🖥️ Host: <span style="font-weight:600; color:#0f172a;">{host}</span>
+                </div>
+                <div style="margin-top:8px; font-size:0.83rem; color:#334155; line-height:1.5; font-style:italic; border-left: 3px solid #e2e8f0; padding-left: 8px;">
+                    {summary_preview}
+                </div>
+                <div style="margin-top:10px; display:flex; gap:20px; align-items:center; flex-wrap:wrap;">
+                    <div style="font-size:0.75rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;">
+                        Final Score: <span style="color:#0f172a; font-family:'IBM Plex Mono',monospace; font-size:0.8rem; font-weight:700;">{final_score:.3f}</span>
+                    </div>
+                    <div style="font-size:0.75rem; color:#64748b; font-weight:600; text-transform:uppercase; letter-spacing:0.04em;">
+                        Root Cause Confidence: <span style="color:#0f172a; font-family:'IBM Plex Mono',monospace; font-size:0.8rem; font-weight:700;">{rc_conf:.0%}</span>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        with col_btn:
+            st.markdown("<div style='min-height: 0.35rem;'></div>", unsafe_allow_html=True)
+            if st.button("View details →", key=f"view_{cid}", use_container_width=True, type="primary"):
                 st.session_state["selected_incident"] = cid
                 st.switch_page("pages/incident_detail.py")
-
-    # Tiny gap between cards
-    st.markdown("<div style='height:2px'></div>", unsafe_allow_html=True)
