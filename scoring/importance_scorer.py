@@ -145,10 +145,16 @@ def score(
     )
     df = df.drop(columns=["_ts_num"])
 
-    # Step 4 — final_score (2-term formula, clipped to [0, 1])
+    # Step 4 — final_score (3-term formula, clipped to [0, 1])
+    # Severity (event_weight) is an explicit term here, deliberately kept OUT of the
+    # IsolationForest features so it contributes exactly once and does not leak the
+    # severity label into the unsupervised model. event_weight is part of the P2
+    # features contract; default to 0 if a legacy caller omits it.
+    severity_term = df["event_weight"] if "event_weight" in df.columns else 0.0
     df["final_score"] = (
         cfg.SCORING_ML_WEIGHT * df["combined_score"]
         + cfg.SCORING_GRAPH_WEIGHT * df["centrality_score"]
+        + cfg.SCORING_SEVERITY_WEIGHT * severity_term
     ).clip(0.0, 1.0)
 
     # Step 5 — validate

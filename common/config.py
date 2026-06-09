@@ -310,6 +310,19 @@ ANOMALY_SCORE_THRESHOLD: float = 0.5
 # k=2.0 flags scores more than 2 standard deviations above the batch mean (~top 2.3%).
 ANOMALY_DYNAMIC_K: float = 2.0
 
+# Anomaly-flag strategy:
+#   "quantile"  — flag the top ANOMALY_CONTAMINATION fraction by combined_score.
+#                 Self-adjusts to each batch and guarantees a stable, non-zero
+#                 anomaly rate.
+#   "dynamic_k" — legacy mean + k·std rule (kept for back-compat). Fragile: when
+#                 combined_score is tightly clustered the threshold can exceed the
+#                 max achievable score and flag nothing (observed: 0/935).
+ANOMALY_FLAG_MODE: str = "quantile"
+
+# Expected fraction of the batch that is anomalous (top-N flagged in quantile mode).
+# Set to the measured signal rate of the synthetic dataset (~13% non-baseline logs).
+ANOMALY_CONTAMINATION: float = 0.13
+
 # Sliding window: retrain on the last N sessions only.
 RETRAINING_SESSION_WINDOW: int = 50
 
@@ -323,11 +336,17 @@ MODEL_STORE_PATH: str = "ml/model_store"
 # Phase 4 — Importance Scoring (P4: Ujwal Hegde)
 # ---------------------------------------------------------------------------
 
-# Weights for the final importance score — 2-term formula.
-# event_weight flows through the ML model indirectly via combined_score.
-# Weights sum to 1.0.
-SCORING_ML_WEIGHT: float = 0.65
-SCORING_GRAPH_WEIGHT: float = 0.35
+# Weights for the final importance score — 3-term formula. Weights sum to 1.0.
+#   final_score = ML_WEIGHT·combined_score        (behavioral anomaly, unsupervised IF)
+#               + GRAPH_WEIGHT·centrality_score    (structural importance)
+#               + SEVERITY_WEIGHT·event_weight     (declared severity)
+# Severity is kept as its own explicit, tunable term here rather than baked into the
+# IsolationForest features. This avoids (a) leaking the severity label into an
+# unsupervised model that is then validated against severity-derived ground truth,
+# and (b) double-counting severity once the model and the score both carry it.
+SCORING_ML_WEIGHT: float = 0.5
+SCORING_GRAPH_WEIGHT: float = 0.25
+SCORING_SEVERITY_WEIGHT: float = 0.25
 
 # Label thresholds: ignore / low / medium / critical
 LABEL_IGNORE_MAX: float = 0.2

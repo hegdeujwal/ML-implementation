@@ -83,6 +83,15 @@ def _normalize_df(df: pd.DataFrame, columns: Iterable[str]):
 
     ordered = [c for c in columns if c in normalized.columns]
 
+    # Convert pandas NaN/NaT to Python None so they are written as SQL NULL.
+    # Without this, a float NaN sent to a nullable INTEGER column (e.g. an
+    # unassigned chain_position) makes Postgres attempt NaN→int and raise
+    # "integer out of range" (error 22003) rather than inserting NULL.
+    for c in ordered:
+        col = normalized[c]
+        if col.isna().any():
+            normalized[c] = col.astype(object).where(col.notna(), None)
+
     return normalized[ordered]
 
 

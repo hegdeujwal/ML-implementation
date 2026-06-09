@@ -48,6 +48,8 @@ from common.config import (
     COLD_START_FULL_CONFIDENCE_THRESHOLD,
     ANOMALY_SCORE_THRESHOLD,
     ANOMALY_DYNAMIC_K,
+    ANOMALY_FLAG_MODE,
+    ANOMALY_CONTAMINATION,
 )
 from common.logger import get_logger
 from common.utils import load_parquet, save_parquet, validate_schema
@@ -194,19 +196,34 @@ def detect(
     )
 
     # ------------------------------------------------------------------
-    # Step 6 — anomaly flag (dynamic threshold: mean + k × std)
+    # Step 6 — anomaly flag
     # ------------------------------------------------------------------
     _score_std = float(combined_score.std())
-    _threshold = (
-        float(combined_score.mean()) + ANOMALY_DYNAMIC_K * _score_std
-        if _score_std >= 1e-6
-        else ANOMALY_SCORE_THRESHOLD  # fallback: all scores identical
-    )
-    logger.info(
-        f"Anomaly threshold: {_threshold:.4f}  "
-        f"(mean={combined_score.mean():.4f}, std={_score_std:.4f}, k={ANOMALY_DYNAMIC_K})"
-    )
-    is_anomaly = combined_score > _threshold
+    if _score_std < 1e-6:
+        # All scores identical — no signal; use the static fallback threshold.
+        _threshold = ANOMALY_SCORE_THRESHOLD
+        is_anomaly = combined_score > _threshold
+        logger.info(
+            f"Anomaly threshold: {_threshold:.4f} (static fallback — score std≈0)"
+        )
+    elif ANOMALY_FLAG_MODE == "quantile":
+        # Flag the top ANOMALY_CONTAMINATION fraction by combined_score. This
+        # guarantees a stable, non-zero anomaly rate tied to the batch's own score
+        # distribution rather than a mean+kσ assumption that can flag nothing.
+        _threshold = float(np.quantile(combined_score, 1.0 - ANOMALY_CONTAMINATION))
+        is_anomaly = combined_score >= _threshold
+        logger.info(
+            f"Anomaly threshold: {_threshold:.4f}  "
+            f"(quantile mode, contamination={ANOMALY_CONTAMINATION:.2f})"
+        )
+    else:  # "dynamic_k" — legacy mean + k·std
+        _threshold = float(combined_score.mean()) + ANOMALY_DYNAMIC_K * _score_std
+        is_anomaly = combined_score > _threshold
+        logger.info(
+            f"Anomaly threshold: {_threshold:.4f}  "
+            f"(dynamic_k mode, mean={combined_score.mean():.4f}, "
+            f"std={_score_std:.4f}, k={ANOMALY_DYNAMIC_K})"
+        )
 
     # ------------------------------------------------------------------
     # Step 7 — assemble and validate output
