@@ -108,7 +108,18 @@ COUNTER_PROXIMITY_WINDOW_SECONDS: int = 30
 # Time window (seconds) for joining Section-4 numeric metrics onto event rows
 # (features/metric_features.py). A metric sample within ±this of an event is
 # considered "near" it. Scoped per scenario so incidents never cross-contaminate.
-METRIC_JOIN_WINDOW_SECONDS: int = 60
+# NOTE: metric samples are ~480s (8 min) apart, so a 60s window only matches
+# events that happen to fall within 60s of a sample (~25% coverage). Widen toward
+# ~240s (half the spacing) to lift coverage toward 100%.
+METRIC_JOIN_WINDOW_SECONDS: int = 240
+
+# Trailing-window sizes (in metric SAMPLES, not seconds) for the rolling-slope
+# trend features. Samples are ~8 min apart, so short=4 ≈ 32 min, long=12 ≈ 96 min.
+# Short reacts fast to drift onset but is noisier; long is smoother but laggier.
+# Both are computed as backward-looking OLS slope normalised by the series' own
+# std, so they share units and are comparable to each other.
+METRIC_SLOPE_SHORT_WINDOW: int = 4
+METRIC_SLOPE_LONG_WINDOW: int = 12
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Parsing
@@ -247,6 +258,11 @@ FEATURE_COLUMNS = [
     "drop_rate_present",
     "utilization",
     "utilization_present",
+    # Rolling-slope trend features (two windows) for gradual-drift detection.
+    "metric_slope_short",
+    "metric_slope_short_present",
+    "metric_slope_long",
+    "metric_slope_long_present",
 ]
 
 # ---------------------------------------------------------------------------
@@ -311,6 +327,13 @@ IF_FEATURE_COLUMNS: list = [
     "drop_rate_present",
     "utilization",
     "utilization_present",
+    # Trend features: backward-looking OLS slope over two windows. These give the
+    # model the rate-of-change signal that point-in-time metrics lack — the
+    # signature of gradual drift (memory leaks, thermal/CPU creep, disk I/O decay).
+    "metric_slope_short",
+    "metric_slope_short_present",
+    "metric_slope_long",
+    "metric_slope_long_present",
 ]
 
 # Hybrid score weights (IF weighted higher — it captures multi-feature interactions

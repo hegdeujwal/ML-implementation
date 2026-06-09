@@ -91,6 +91,14 @@ class FeaturesRow:
     utilization: float = 0.0            # interface/buffer utilization % near this event
     utilization_present: int = 0
 
+    # --- Rolling-slope trend features (two windows) ---
+    # Backward-looking OLS slope of the fastest-drifting nearby metric, normalised
+    # by that series' std. Captures gradual drift that point-in-time values miss.
+    metric_slope_short: float = 0.0     # ~32 min trailing slope (fast, noisier)
+    metric_slope_short_present: int = 0
+    metric_slope_long: float = 0.0      # ~96 min trailing slope (smooth, laggier)
+    metric_slope_long_present: int = 0
+
 
 @dataclass
 class AnomalyRow:
