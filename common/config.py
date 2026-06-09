@@ -105,6 +105,11 @@ DEFAULT_SEVERITY_WEIGHT: float = 0.1
 # Counter anomaly proximity
 COUNTER_PROXIMITY_WINDOW_SECONDS: int = 30
 
+# Time window (seconds) for joining Section-4 numeric metrics onto event rows
+# (features/metric_features.py). A metric sample within ±this of an event is
+# considered "near" it. Scoped per scenario so incidents never cross-contaminate.
+METRIC_JOIN_WINDOW_SECONDS: int = 60
+
 # ---------------------------------------------------------------------------
 # Phase 1 — Parsing
 # ---------------------------------------------------------------------------
@@ -235,6 +240,13 @@ FEATURE_COLUMNS = [
     "inter_arrival_rate",
     "event_weight",
     "counter_proximity",
+    # Section-4 numeric-metric features (features/metric_features.py).
+    "metric_zscore",
+    "metric_zscore_present",
+    "drop_rate",
+    "drop_rate_present",
+    "utilization",
+    "utilization_present",
 ]
 
 # ---------------------------------------------------------------------------
@@ -290,6 +302,15 @@ IF_FEATURE_COLUMNS: list = [
     "time_delta_session_start",
     "inter_arrival_rate",
     "counter_proximity",
+    # Section-4 numeric telemetry — observed measurements (not label proxies),
+    # so safe to learn from. Paired *_present flags let the model tell a real 0
+    # from a neutrally-filled absent value.
+    "metric_zscore",
+    "metric_zscore_present",
+    "drop_rate",
+    "drop_rate_present",
+    "utilization",
+    "utilization_present",
 ]
 
 # Hybrid score weights (IF weighted higher — it captures multi-feature interactions

@@ -69,6 +69,13 @@ def build_features_df(n_rows: int = 200, n_sessions: int = 5) -> pd.DataFrame:
         "time_delta_session_start": rng.uniform(0.0, 1800.0, n_rows),
         "inter_arrival_rate":       rng.exponential(5.0, n_rows),
         "counter_proximity":        rng.uniform(0.0, 1.0, n_rows),
+        # Section-4 metric features (values + present flags)
+        "metric_zscore":            rng.uniform(0.0, 4.0, n_rows),
+        "metric_zscore_present":    rng.choice([0.0, 1.0], n_rows),
+        "drop_rate":                rng.uniform(0.0, 100.0, n_rows),
+        "drop_rate_present":        rng.choice([0.0, 1.0], n_rows),
+        "utilization":              rng.uniform(0.0, 100.0, n_rows),
+        "utilization_present":      rng.choice([0.0, 1.0], n_rows),
     })
 
 

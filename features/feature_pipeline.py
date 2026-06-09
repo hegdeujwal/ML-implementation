@@ -10,11 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
+
 from common.config import (
     FEATURE_COLUMNS,
     FEATURE_ROLLING_MAX_SESSIONS,
     FEATURE_ROLLING_STORE_PATH,
     FEATURES_OUTPUT_PATH,
+    METRICS_DF_PATH,
     ZSCORE_BASELINE_N_SESSIONS,
     ZSCORE_BASELINE_STORE_PATH,
 )
@@ -29,6 +32,7 @@ from features.statistical_features import (
 )
 from features.temporal_features import time_delta_prev, time_delta_session_start, inter_arrival_rate
 from features.counter_proximity import compute_counter_proximity
+from features.metric_features import compute_metric_features, METRIC_FEATURE_COLUMNS
 
 logger = get_logger(__name__)
 
@@ -102,6 +106,16 @@ def run_pipeline(input_path: str) -> pd.DataFrame:
 
         # 5. Counter proximity (host-scoped, not session-scoped)
         df["counter_proximity"] = compute_counter_proximity(df)
+
+        # 5b. Section-4 numeric-metric features (joined from metrics_df by time
+        # proximity). Absent metrics → neutral 0 with present=0, so the legacy
+        # syslog path (no metrics_df) and metric-less scenarios stay valid.
+        metrics_df = None
+        if Path(METRICS_DF_PATH).exists():
+            metrics_df = load_parquet(METRICS_DF_PATH)
+        metric_feats = compute_metric_features(df, metrics_df)
+        for col in METRIC_FEATURE_COLUMNS:
+            df[col] = metric_feats[col].astype(float).values
 
         # 6. event_weight already present in parquet from sessionizer — not recomputed
 
