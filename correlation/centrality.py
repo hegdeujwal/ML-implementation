@@ -34,6 +34,7 @@ Capped templates (outside GRAPH_MAX_NODES)
 
 from __future__ import annotations
 
+import gc
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -152,28 +153,46 @@ def compute_centrality(
     )
 
     # Step 4 — correlated_log_ids per row
-    # For each row: find other logs in the same session whose template is a
-    # graph-neighbour of this row's template; return their sequence_numbers
-    # as strings. Empty list for capped templates or templates with no edges.
+    # All rows with the same (session_id, template_id) get the same result,
+    # so compute at that level (~session*template entries) instead of per-row
+    # (35K+ Series allocations via apply). Much lower peak memory.
     session_tmpl_to_seqnums: dict = (
         df.groupby(["session_id", "template_id"])["sequence_number"]
         .apply(list)
         .to_dict()
     )
 
-    def _correlated(row: pd.Series) -> list:
-        if not score_lookup[row["template_id"]]["in_graph"]:
-            return []
-        neighbours = set(graph.neighbors(row["template_id"]))
-        result: list = []
-        for neighbour in neighbours:
-            key = (row["session_id"], neighbour)
-            result.extend(
-                str(s) for s in session_tmpl_to_seqnums.get(key, [])
-            )
-        return result
+    # Pre-compute neighbor sets once per in-graph template
+    _neighbor_cache: dict = {}
+    for tid in included_templates:
+        if graph.has_node(tid):
+            _neighbor_cache[tid] = set(graph.neighbors(tid))
 
-    df["correlated_log_ids"] = df.apply(_correlated, axis=1)
+    # Build lookup at (session_id, template_id) level
+    # Cap at 20 entries per list — this column is explainability metadata,
+    # not used in scoring. Uncapped lists cause multi-GB memory bloat.
+    _MAX_CORRELATED = 20
+    _corr_lookup: dict = {}
+    _empty_list: list = []
+    for (sid, tid), _seqnums in session_tmpl_to_seqnums.items():
+        if tid not in _neighbor_cache:
+            _corr_lookup[(sid, tid)] = _empty_list
+            continue
+        result: list = []
+        for nbr in _neighbor_cache[tid]:
+            result.extend(
+                str(s) for s in session_tmpl_to_seqnums.get((sid, nbr), [])
+            )
+            if len(result) >= _MAX_CORRELATED:
+                result = result[:_MAX_CORRELATED]
+                break
+        _corr_lookup[(sid, tid)] = result
+
+    # Map back to rows via tuple key (vectorized dict lookup, no apply)
+    _keys = list(zip(df["session_id"], df["template_id"]))
+    df["correlated_log_ids"] = [_corr_lookup.get(k, _empty_list) for k in _keys]
+    del _keys, _corr_lookup, _neighbor_cache, session_tmpl_to_seqnums
+    gc.collect()
 
     # Step 5 — in_sequence placeholder; sequence_engine updates this column
     df["in_sequence"] = False

@@ -22,6 +22,7 @@ Optional flags (edit constants below or pass via environment):
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -112,6 +113,11 @@ def run() -> None:
     t0 = time.perf_counter()
 
     graph_scores_df = compute_centrality(g, raw_df)
+
+    # Free the graph and raw_df — centrality values are captured in graph_scores_df
+    del g
+    gc.collect()
+
     logger.info(
         "Centrality computed for %d log rows  centrality_score range=[%.4f, %.4f]  (%.2fs)",
         len(graph_scores_df),
@@ -132,6 +138,10 @@ def run() -> None:
         seq_df = seq_df.copy()
         seq_df["timestamp"] = seq_df["timestamp"].astype("int64") / 1e9
     in_sequence_log_ids = detect_sequences(seq_df, output_path=SEQUENCES_JSON_PATH)
+
+    # Free sequence working data
+    del seq_df, raw_df
+    gc.collect()
 
     with open(SEQUENCES_JSON_PATH, "r") as fh:
         sequences = json.load(fh)
@@ -163,6 +173,11 @@ def run() -> None:
     # ------------------------------------------------------------------
     _section("Step 5/5 — Export graph JSON")
     t0 = time.perf_counter()
+
+    # Reload the graph from cache for JSON export (g was freed after centrality)
+    import pickle
+    with open(GRAPH_PICKLE_PATH, "rb") as fh:
+        g = pickle.load(fh)
 
     export_graph_json(g, output_path=GRAPH_JSON_PATH)
     logger.info(
