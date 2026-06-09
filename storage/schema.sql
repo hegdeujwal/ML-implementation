@@ -17,9 +17,26 @@ CREATE TABLE IF NOT EXISTS logs (
     metadata JSONB,
     session_id TEXT,
 
+    -- Provenance / inference-tracking columns (synthetic_dataset_loader.py)
+    source_file VARCHAR(255),
+    scenario_id VARCHAR(255),
+    section INT,
+    component VARCHAR(100),
+    code_location VARCHAR(255),
+    severity_explicit BOOLEAN,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Idempotent upgrades for pre-existing logs tables (CREATE IF NOT EXISTS above
+-- is a no-op when the table already exists, so add new columns explicitly).
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS source_file VARCHAR(255);
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS scenario_id VARCHAR(255);
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS section INT;
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS component VARCHAR(100);
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS code_location VARCHAR(255);
+ALTER TABLE logs ADD COLUMN IF NOT EXISTS severity_explicit BOOLEAN;
 
 -- =========================
 -- FEATURES TABLE

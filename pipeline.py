@@ -79,7 +79,13 @@ def _step_parsing(log_file: str) -> int:
     """
     p = Path(log_file)
 
-    if p.exists():
+    if p.is_dir():
+        # A directory is treated as the mentor's multi-section synthetic dataset.
+        # The section-aware loader also emits metrics_df.parquet + scenario_labels.parquet.
+        logger.info(f"Parsing synthetic dataset directory: {log_file}")
+        from parsing.synthetic_dataset_loader import run as load_synthetic
+        df = load_synthetic(log_file, output_path=SESSIONIZED_PATH)
+    elif p.exists():
         logger.info(f"Parsing raw log file: {log_file}")
         from parsing.sessionizer import run as sessionize
         df = sessionize(log_file, output_path=SESSIONIZED_PATH)

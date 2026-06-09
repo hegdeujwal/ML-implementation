@@ -26,21 +26,35 @@ class LogEntry:
     sequence_number is the universal join key across all downstream DataFrames.
     session_id is kept here for feature engineering groupby operations but is
     not part of the canonical Postgres/ES schema.
+
+    The trailing fields (source_file … severity_explicit) are ADDITIVE columns
+    populated by parsing/synthetic_dataset_loader.py for the multi-section
+    synthetic dataset. They default to neutral sentinels so the legacy syslog
+    path (parsing/sessionizer.py) and existing readers are unaffected — every
+    field carries an honest sentinel rather than a null.
     """
     sequence_number: int
     timestamp: datetime
     source_type: str        # 'switch' for all HPE CX logs
     service: str            # normalised subsystem: OSPF, BGP, SYSTEM, ...
     host: str               # device hostname
-    log_level: str          # CRITICAL | ERROR | WARN | INFO
+    log_level: str          # CRITICAL | HIGH | ERROR | MEDIUM | WARN | INFO
     event_type: str         # subsystem label (= service)
     event_action: str       # specific action (template_id minus service prefix)
     template_id: str        # Drain template slug
     frequency: int          # count of this template_id in the same session
-    event_weight: float     # CRITICAL=1.0, ERROR=0.7, WARN=0.4, INFO=0.1
+    event_weight: float     # CRITICAL=1.0, HIGH=.85, ERROR=.7, MEDIUM=.55, WARN=.4, INFO=.1
     message: str            # log message content
-    metadata: str           # JSON string: {"raw_text": "<original line>"}
+    metadata: str           # JSON string: {"raw_text": ..., plus archived raw fields}
     session_id: str         # groups related events; not in canonical DB schema
+
+    # --- Additive provenance / inference-tracking columns (loader-populated) ---
+    source_file: str = "UNKNOWN"        # originating log filename
+    scenario_id: str = "UNKNOWN"        # scenario slug; join key to ScenarioLabelRow
+    section: int = 0                    # source section number (1/2/3/5); 0 = legacy/unknown
+    component: str = "UNKNOWN"          # explicit component= field; better graph key than host
+    code_location: str = "NONE"        # debug-trace source location, e.g. "spanning_tree.c:1254"
+    severity_explicit: bool = False    # True if log_level read from an explicit severity= field
 
 
 @dataclass
@@ -64,6 +78,18 @@ class FeaturesRow:
     inter_arrival_rate: float
     event_weight: float
     counter_proximity: float
+
+    # --- Additive numeric-metric features (phase 2; sourced from MetricRow) ---
+    # Each value is paired with a *_present flag so a neutrally-imputed cell can
+    # never masquerade as a real anomaly. These are intentionally NOT yet part of
+    # IF_FEATURE_COLUMNS — adding them retrains the model, which is a deliberate
+    # step taken only after the features are validated against the oracle.
+    metric_zscore: float = 0.0          # z-score of the nearest numeric metric sample
+    metric_zscore_present: int = 0      # 1 if a real metric sample backed metric_zscore
+    drop_rate: float = 0.0              # packet/queue drop rate near this event
+    drop_rate_present: int = 0
+    utilization: float = 0.0            # interface/buffer utilization % near this event
+    utilization_present: int = 0
 
 
 @dataclass
@@ -134,3 +160,39 @@ class RootCauseRow:
     root_cause_log_id: int    # sequence_number of the candidate
     confidence_score: float   # [0.0, 1.0]
     in_graph: bool
+
+
+@dataclass
+class MetricRow:
+    """One row of metrics_df.parquet — long/tidy numeric telemetry (Section 4).
+
+    Long format is intentional: a metric that does not apply to a scenario is
+    simply an absent row (no structural NaN). Each row is one (timestamp, entity,
+    metric_name) numeric sample. The feature stage pivots/aggregates these and
+    handles per-series imputation only where a sampling gap exists within a
+    metric that IS present.
+    """
+    timestamp: datetime
+    source_file: str        # originating log filename
+    scenario_id: str        # scenario slug; join key to ScenarioLabelRow
+    entity: str             # interface / counter / buffer the metric belongs to
+    metric_name: str        # util_rx, drops_rx, queue_used, queue_max, buffer_pct, counter_pct, ...
+    metric_value: float     # numeric value (percentages stored as their numeric magnitude)
+
+
+@dataclass
+class ScenarioLabelRow:
+    """One row of scenario_labels.parquet — per-file ground truth (Section 7).
+
+    EVALUATION ORACLE ONLY. Never joined into the feature/anomaly path; consumed
+    solely by the evaluation harness to check whether the unsupervised pipeline
+    surfaced the known incident and its expected correlation signals.
+    """
+    scenario_id: str            # scenario slug; primary key
+    source_file: str
+    training_label: str         # e.g. CRITICAL_PROTOCOL_FAILURE
+    failure_mode: str
+    root_cause: str
+    file_severity: str          # file-level severity from the header
+    affected_components: list   # parsed from "[...]" list
+    correlation_signals: list   # expected signals, e.g. [FRAME_RX_TIMEOUT, ...]

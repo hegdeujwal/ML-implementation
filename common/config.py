@@ -85,10 +85,16 @@ ML_CONFIG = {
 # Controls contribution of each signal to final score
 # ----------------------------
 
-# Severity weights
+# Severity weights.
+# HIGH and MEDIUM were added for the multi-section synthetic dataset, whose events
+# carry an explicit severity=HIGH|MEDIUM field. They are ordered between the
+# pre-existing levels so the CRITICAL > HIGH > ERROR > MEDIUM > WARN > INFO ranking
+# is preserved instead of collapsing unknown levels to DEFAULT_SEVERITY_WEIGHT.
 SEVERITY_WEIGHTS = {
     "CRITICAL": 1.0,
+    "HIGH": 0.85,
     "ERROR": 0.7,
+    "MEDIUM": 0.55,
     "WARN": 0.4,
     "INFO": 0.1,
 }
@@ -121,7 +127,38 @@ SERVICE_ALIAS_MAP: dict = {
     "snmpd":       "SNMP",
     "lldpd":       "LLDP",
     "cfgd":        "CONFIG",
+
+    # --- Generic vendor-neutral component names (mentor's synthetic dataset) ---
+    "spanning_tree_daemon":  "STP",
+    "redundancy_daemon":     "REDUNDANCY",
+    "forwarding_engine":     "FORWARDING",
+    "access_control_daemon": "ACL",
+    "routing_daemon":        "ROUTING",
+    "mac_learning":          "MAC",
+    "qos_scheduler_daemon":  "QOS",
+    "buffer_manager":        "BUFFER",
+    "physical_monitor":      "PHYSICAL",
+    "statistics_collector":  "STATS",
+    "system_logger":         "SYSTEM",
+    "process_monitor":       "SYSTEM",
+    "network_monitor":       "NETWORK",
+
+    # --- Routine/heartbeat services: the ~90% baseline noise. Collapsed to a
+    #     single NOISE label so the feature stage can suppress/down-weight them. ---
+    "monitoring":             "NOISE",
+    "continuous_monitoring":  "NOISE",
+    "routine_check":          "NOISE",
+    "periodic_status":        "NOISE",
+    "system_check":           "NOISE",
+    "status_verification":    "NOISE",
+    "health_check":           "NOISE",
+    "metrics_update":         "NOISE",
+    "frame_monitoring":       "NOISE",
 }
+
+# Canonical service label assigned to routine/heartbeat logs (see SERVICE_ALIAS_MAP).
+# Feature/noise-suppression logic can key off this single value.
+NOISE_SERVICE_LABEL: str = "NOISE"
 
 
 # Statistical features
@@ -155,6 +192,16 @@ SESSIONIZED_LOGS_PATH: str = (
 FEATURES_OUTPUT_PATH: str = (
     "data/processed/features_df.parquet"
 )
+
+# --- Multi-section synthetic dataset artifacts (parsing/synthetic_dataset_loader.py) ---
+# Long/tidy numeric metrics extracted from Section 4 of each scenario file.
+# Long format means "metric not applicable to a scenario" is simply an absent row,
+# avoiding a wide sparse table full of structural NaNs.
+METRICS_DF_PATH: str = "data/processed/metrics_df.parquet"
+
+# Per-file ground-truth record from Section 7 (training_label, correlation_signals, …).
+# Used ONLY by the evaluation harness as an oracle — never fed to the model.
+SCENARIO_LABELS_PATH: str = "data/processed/scenario_labels.parquet"
 
 # ---------------------------------------------------------------------------
 # Persistent drift detection stores
