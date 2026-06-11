@@ -55,7 +55,7 @@ def build_features_df(n_rows: int = 200, n_sessions: int = 5) -> pd.DataFrame:
     """
     rng = np.random.default_rng(0)
     templates = ["ROUTE", "PORT_DOWN", "LOGIN", "HEALTH"]
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "sequence_number":          np.arange(1, n_rows + 1),
         "session_id":               [f"sess_{i % n_sessions}" for i in range(n_rows)],
         "template_id":              [templates[i % len(templates)] for i in range(n_rows)],
@@ -76,7 +76,18 @@ def build_features_df(n_rows: int = 200, n_sessions: int = 5) -> pd.DataFrame:
         "drop_rate_present":        rng.choice([0.0, 1.0], n_rows),
         "utilization":              rng.uniform(0.0, 100.0, n_rows),
         "utilization_present":      rng.choice([0.0, 1.0], n_rows),
+        # Rolling-slope trend features (std-normalised OLS slope + present flags)
+        "metric_slope_short":          rng.uniform(-3.0, 3.0, n_rows),
+        "metric_slope_short_present":  rng.choice([0.0, 1.0], n_rows),
+        "metric_slope_long":           rng.uniform(-3.0, 3.0, n_rows),
+        "metric_slope_long_present":   rng.choice([0.0, 1.0], n_rows),
     })
+    # Safety net: any IF feature added to config after this fixture was written
+    # gets a generic finite filler instead of breaking every detect() test.
+    for col in IF_FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = rng.uniform(0.0, 1.0, n_rows)
+    return df
 
 
 def _make_anomaly_df(n_rows: int = 100) -> pd.DataFrame:
