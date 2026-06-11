@@ -220,6 +220,20 @@ METRICS_DF_PATH: str = "data/processed/metrics_df.parquet"
 SCENARIO_LABELS_PATH: str = "data/processed/scenario_labels.parquet"
 
 # ---------------------------------------------------------------------------
+# Oracle evaluation (evaluation/oracle_report.py)
+# ---------------------------------------------------------------------------
+
+# Log levels that define ground-truth "signal" rows for evaluation.
+# Severity is deliberately excluded from IF_FEATURE_COLUMNS, so judging the
+# anomaly stage against severity-derived truth is fair (not circular).
+# final_score DOES carry a severity term (SCORING_SEVERITY_WEIGHT) — ranking
+# metrics computed against this truth are partially favoured by construction.
+ORACLE_TRUTH_SEVERITIES: list = ["CRITICAL", "HIGH", "ERROR"]
+
+# Where the oracle evaluation report text file is written.
+ORACLE_REPORT_PATH: str = "evaluation/results/oracle_report.txt"
+
+# ---------------------------------------------------------------------------
 # Persistent drift detection stores
 # ---------------------------------------------------------------------------
 
