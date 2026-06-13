@@ -256,6 +256,9 @@ class AnomalyTrainer:
         metadata = {
             "timestamp": timestamp,
             "n_samples": n_samples,
+            # Training-score calibration (informational copy — the live values
+            # ride on pipeline.calibration_ through the pickle).
+            "calibration": getattr(pipeline, "calibration_", None),
             "contamination": IF_CONTAMINATION,
             "feature_columns": IF_FEATURE_COLUMNS,
             "isolation_weight": IF_ISOLATION_WEIGHT,

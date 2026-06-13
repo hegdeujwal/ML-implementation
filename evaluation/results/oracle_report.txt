@@ -1,0 +1,36 @@
+ORACLE EVALUATION REPORT
+truth = log_level in ['CRITICAL', 'HIGH', 'ERROR'] (severity is excluded from IF features; final_score ranking metrics are partially favoured by the severity term)
+
+total_logs: 16121
+truth_signal_count: 338
+truth_signal_rate: 0.0210
+unscored_rows: 0
+anomaly_flagged_count: 623
+anomaly_flagged_rate: 0.0386
+anomaly_tp: 11
+anomaly_fp: 612
+anomaly_fn: 327
+anomaly_precision: 0.0177
+anomaly_recall: 0.0325
+anomaly_f1: 0.0229
+ranking_recall_at_k: 0.2929
+ranking_recall_at_k_ml: 0.0148
+mean_final_score_signal: 0.3404
+mean_final_score_noise: 0.1074
+score_separation: 0.2330
+critical_capture_rate: 0.5828
+noise_suppression_ratio: 0.9252
+signal_incident_coverage: 0.9852
+scenario_detection_rate: 1.0000
+scenarios_detected: 7
+scenarios_total: 7
+
+Per-scenario breakdown:
+     scenario_id            training_label  n_logs  n_signal  n_signal_flagged  signal_recall  detected
+daily_2026-06-02 CRITICAL_PROTOCOL_FAILURE    2158        44                 1       0.022727      True
+daily_2026-06-03     HIGH_HARDWARE_FAILURE    2160        27                 1       0.037037      True
+daily_2026-06-04       HIGH_BUFFER_FAILURE    2296        44                 2       0.045455      True
+daily_2026-06-05 CRITICAL_OOM_KILL_CASCADE    2279        50                 2       0.040000      True
+daily_2026-06-06      HIGH_ROUTING_FAILURE    2253        54                 1       0.018519      True
+daily_2026-06-07          HIGH_CPU_FAILURE    2372        62                 3       0.048387      True
+daily_2026-06-08       CRITICAL_HA_FAILURE    2603        57                 1       0.017544      True

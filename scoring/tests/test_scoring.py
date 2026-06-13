@@ -11,6 +11,7 @@ pytest's tmp_path so no production files are written during tests.
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -245,7 +246,9 @@ class TestImportanceScorer:
     def test_missing_anomaly_rows_filled_with_mean(self, caplog):
         features_df, anomaly_df, graph_scores_df = build_test_inputs(n_rows=20, n_sessions=2)
         anomaly_partial = anomaly_df.iloc[:15].copy()
-        with caplog.at_level(logging.WARNING, logger="scoring.importance_scorer"):
+        # 25% missing exceeds the systematic-gap cap — raise it to test the fill path
+        with patch.object(cfg, "SCORING_MAX_MISSING_FRACTION", 0.5), \
+             caplog.at_level(logging.WARNING, logger="scoring.importance_scorer"):
             result = score(features_df, anomaly_partial, graph_scores_df)
         assert not result["combined_score"].isna().any()
         assert "filled with mean" in caplog.text
@@ -253,7 +256,8 @@ class TestImportanceScorer:
     def test_missing_graph_rows_filled_with_mean(self, caplog):
         features_df, anomaly_df, graph_scores_df = build_test_inputs(n_rows=20, n_sessions=2)
         graph_partial = graph_scores_df.iloc[:15].copy()
-        with caplog.at_level(logging.WARNING, logger="scoring.importance_scorer"):
+        with patch.object(cfg, "SCORING_MAX_MISSING_FRACTION", 0.5), \
+             caplog.at_level(logging.WARNING, logger="scoring.importance_scorer"):
             result = score(features_df, anomaly_df, graph_partial)
         assert not result["centrality_score"].isna().any()
         assert "filled with mean" in caplog.text
@@ -262,12 +266,36 @@ class TestImportanceScorer:
         features_df, anomaly_df, graph_scores_df = build_test_inputs(n_rows=20, n_sessions=2)
         anomaly_partial = anomaly_df.iloc[:15].copy()
         graph_partial = graph_scores_df.iloc[:15].copy()
-        result = score(features_df, anomaly_partial, graph_partial)
+        with patch.object(cfg, "SCORING_MAX_MISSING_FRACTION", 0.5):
+            result = score(features_df, anomaly_partial, graph_partial)
         missing_anomaly = ~features_df["sequence_number"].isin(anomaly_partial["sequence_number"])
         missing_graph = ~features_df["sequence_number"].isin(graph_partial["sequence_number"])
         assert (result.loc[missing_anomaly, "is_anomaly"] == False).all()
         assert (result.loc[missing_graph, "in_graph"] == False).all()
         assert (result.loc[missing_graph, "in_sequence"] == False).all()
+
+    def test_missing_rows_flagged_in_audit_columns(self):
+        features_df, anomaly_df, graph_scores_df = build_test_inputs(n_rows=100, n_sessions=5)
+        # Drop 2% from anomaly, 3% from graph — below the 5% cap, no raise
+        anomaly_partial = anomaly_df.iloc[2:].copy()
+        graph_partial = graph_scores_df.iloc[3:].copy()
+        result = score(features_df, anomaly_partial, graph_partial)
+        assert int(result["anomaly_missing"].sum()) == 2
+        assert int(result["graph_missing"].sum()) == 3
+        dropped_anomaly_seqs = set(anomaly_df["sequence_number"].iloc[:2])
+        assert set(result.loc[result["anomaly_missing"], "sequence_number"]) == dropped_anomaly_seqs
+
+    def test_complete_inputs_have_no_missing_flags(self):
+        features_df, anomaly_df, graph_scores_df = build_test_inputs()
+        result = score(features_df, anomaly_df, graph_scores_df)
+        assert not result["anomaly_missing"].any()
+        assert not result["graph_missing"].any()
+
+    def test_systematic_gap_raises(self):
+        features_df, anomaly_df, graph_scores_df = build_test_inputs(n_rows=100, n_sessions=5)
+        anomaly_partial = anomaly_df.iloc[50:].copy()   # 50% missing
+        with pytest.raises(ValueError, match="missing from anomaly_df"):
+            score(features_df, anomaly_partial, graph_scores_df)
 
     def test_temporal_proximity_in_range_per_session(self):
         features_df, anomaly_df, graph_scores_df = build_test_inputs()
@@ -322,10 +350,13 @@ class TestLabelMapper:
         assert map_labels(self._df([0.1]))["label"].iloc[0] == "ignore"
 
     def test_low_label(self):
-        assert map_labels(self._df([0.35]))["label"].iloc[0] == "low"
+        # Midpoints of the configured bands, so threshold retunes don't break these tests
+        mid_low = (cfg.LABEL_IGNORE_MAX + cfg.LABEL_LOW_MAX) / 2
+        assert map_labels(self._df([mid_low]))["label"].iloc[0] == "low"
 
     def test_medium_label(self):
-        assert map_labels(self._df([0.6]))["label"].iloc[0] == "medium"
+        mid_medium = (cfg.LABEL_LOW_MAX + cfg.LABEL_MEDIUM_MAX) / 2
+        assert map_labels(self._df([mid_medium]))["label"].iloc[0] == "medium"
 
     def test_critical_label(self):
         assert map_labels(self._df([0.9]))["label"].iloc[0] == "critical"

@@ -212,6 +212,82 @@ class TestZscoreBase:
 
 
 # ---------------------------------------------------------------------------
+# statistical_features — zscore_base_persistent (Welford store)
+# ---------------------------------------------------------------------------
+
+class TestZscorePersistent:
+    """Pre-update scoring, leave-one-out re-runs, and bounded seen-ID store.
+
+    Fixture sequence (one host, one template, chronological sessions):
+        freqs = [10, 12, 8, 30]
+    Hand-computed expectations against the PRIOR baseline:
+        s0: no history                        → z = 0
+        s1: 1 prior obs, no std               → z = 0
+        s2: baseline [10, 12]   mean=11 std≈1.414 → z = (8-11)/1.414 ≈ -2.121
+        s3: baseline [10, 12, 8] mean=10 std=2    → z = (30-10)/2 = 10 → clip 5.0
+    (The old post-update scoring folded the spike into its own baseline:
+    mean=15 std≈10.1 → z≈1.48 — the spike shrank its own score.)
+    """
+
+    FREQS = [10, 12, 8, 30]
+
+    def _df(self) -> pd.DataFrame:
+        base = datetime(2024, 1, 1)
+        frames = [
+            _make_session(2, host="sw-01", session_id=f"s{i}", template_id="T_W",
+                          frequency=f, start=base + timedelta(hours=i))
+            for i, f in enumerate(self.FREQS)
+        ]
+        return pd.concat(frames, ignore_index=True)
+
+    def _run(self, tmp_path, df=None):
+        from features.statistical_features import zscore_base_persistent
+        return zscore_base_persistent(
+            df if df is not None else self._df(),
+            str(tmp_path / "welford.parquet"),
+        )
+
+    def test_spike_scored_against_prior_baseline(self, tmp_path):
+        df = self._df()
+        result = self._run(tmp_path, df)
+        z_by_session = {
+            sid: result[df["session_id"] == sid].iloc[0]
+            for sid in ("s0", "s1", "s2", "s3")
+        }
+        assert z_by_session["s0"] == pytest.approx(0.0)
+        assert z_by_session["s1"] == pytest.approx(0.0)
+        assert z_by_session["s2"] == pytest.approx(-2.1213, abs=1e-3)
+        # Spike clipped at +5; post-update scoring would have given ~1.48
+        assert z_by_session["s3"] == pytest.approx(5.0)
+
+    def test_rerun_reproduces_scores_exactly(self, tmp_path):
+        """Leave-one-out on a seen session must equal the original pre-update z."""
+        df = self._df()
+        first = self._run(tmp_path, df)
+        second = self._run(tmp_path, df)
+        pd.testing.assert_series_equal(first, second)
+
+    def test_rerun_does_not_double_count(self, tmp_path):
+        self._run(tmp_path)
+        self._run(tmp_path)
+        store = pd.read_parquet(tmp_path / "welford.parquet")
+        assert store["n"].iloc[0] == len(self.FREQS)
+
+    def test_seen_ids_capped(self, tmp_path):
+        from features.statistical_features import zscore_base_persistent
+        import json
+        df = self._df()
+        zscore_base_persistent(df, str(tmp_path / "welford.parquet"), seen_cap=2)
+        store = pd.read_parquet(tmp_path / "welford.parquet")
+        seen = json.loads(store["seen_session_ids"].iloc[0])
+        assert len(seen) == 2
+        # Oldest evicted first — the two newest session IDs remain,
+        # each mapped to its originally computed z-score
+        assert sorted(seen) == ["s2", "s3"]
+        assert seen["s3"] == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
 # temporal_features
 # ---------------------------------------------------------------------------
 

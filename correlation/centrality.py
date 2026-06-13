@@ -17,12 +17,16 @@ degree
     Raw node degree from graph.degree[v]. Stored as int.
 
 betweenness_centrality
-    k=50 approximation for performance; exact betweenness is O(n³).
-    NetworkX normalised=True already divides by possible path count.
+    Distance = 1/weight (co-occurrence weight is affinity; NetworkX expects
+    path cost). Exact below BETWEENNESS_LARGE_GRAPH_THRESHOLD nodes, k-pivot
+    approximation (k=BETWEENNESS_K) above. normalised=True divides by
+    possible path count.
 
 pagerank  (used as centrality_score)
-    alpha=GRAPH_PAGERANK_ALPHA=0.85. Min-max normalised to [0,1].
-    Degenerate case (single node or all-equal scores) → 0.5 instead of 0.0.
+    Weighted by PMI (frequency-corrected association) so centrality means
+    "structurally implicated", not "frequent". alpha=GRAPH_PAGERANK_ALPHA.
+    Min-max normalised to [0,1]; degenerate case (single node or all-equal
+    scores) → 0.5 instead of 0.0.
 
 Capped templates (outside GRAPH_MAX_NODES)
     centrality_score = global mean of in-graph PageRank values
@@ -75,16 +79,36 @@ def compute_centrality(
         global_mean_centrality = 0.5
         global_mean_betweenness = 0.5
     else:
-        # k approximation — exact betweenness is O(n³), k=50 keeps it fast
+        # NetworkX interprets betweenness edge weight as *distance* (path
+        # cost), so strongly co-occurring templates must be CLOSE, not far:
+        # use 1/weight. Passing weight="weight" directly inverts the metric.
+        for _u, _v, _d in graph.edges(data=True):
+            _d["distance"] = 1.0 / (_d.get("weight", 0.0) + 1e-10)
+
+        # Exact betweenness below the size threshold, k-pivot approximation
+        # above it (exact is O(V·E); see config).
+        _bw_k = (
+            None
+            if len(graph) <= cfg.BETWEENNESS_LARGE_GRAPH_THRESHOLD
+            else min(cfg.BETWEENNESS_K, len(graph))
+        )
         bw_raw = nx.betweenness_centrality(
             graph,
-            weight="weight",
+            weight="distance",
             normalized=True,
-            k=min(50, len(graph)),
+            k=_bw_k,
         )
 
+        # PageRank weighted by PMI: frequency-corrected association, so hub
+        # status means "structurally implicated", not merely "common chatter".
+        # Raw co-occurrence weight made the most frequent routine templates
+        # the most central. Fall back to raw weight when PMI is degenerate
+        # (all zero — possible on tiny graphs).
+        _has_pmi = any(d.get("pmi", 0.0) > 0.0 for _, _, d in graph.edges(data=True))
         pr_raw = nx.pagerank(
-            graph, alpha=cfg.GRAPH_PAGERANK_ALPHA, weight="weight"
+            graph,
+            alpha=cfg.GRAPH_PAGERANK_ALPHA,
+            weight="pmi" if _has_pmi else "weight",
         )
 
         # Min-max normalise PageRank to [0,1]; degenerate → 0.5 not 0.0

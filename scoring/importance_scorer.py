@@ -73,6 +73,26 @@ def score(
         len(df), n_missing_anomaly, n_missing_graph,
     )
 
+    # Audit trail BEFORE any filling: rows absent from an upstream input get
+    # mean-filled below, which makes them look perfectly average — these flags
+    # are the only record that their scores are imputed, not computed. They are
+    # carried through to scored_logs_df.parquet.
+    df["anomaly_missing"] = ~df["sequence_number"].isin(anomaly_df["sequence_number"])
+    df["graph_missing"] = ~df["sequence_number"].isin(graph_scores_df["sequence_number"])
+
+    # A few stragglers are tolerable; a systematic gap means an upstream stage
+    # silently lost rows — fail loudly instead of papering over it with means.
+    for flag_col, source in (("anomaly_missing", "anomaly_df"),
+                             ("graph_missing", "graph_scores_df")):
+        frac = float(df[flag_col].mean()) if len(df) else 0.0
+        if frac > cfg.SCORING_MAX_MISSING_FRACTION:
+            raise ValueError(
+                f"{frac:.1%} of rows are missing from {source} "
+                f"(cap: {cfg.SCORING_MAX_MISSING_FRACTION:.1%}). Refusing to "
+                "mean-fill a systematic gap — check why the upstream stage "
+                "dropped these sequence_numbers."
+            )
+
     # Step 2 — fill missing values
     # Bool columns (is_anomaly, in_graph, in_sequence) → False
     for col in _BOOL_FILL_COLS:

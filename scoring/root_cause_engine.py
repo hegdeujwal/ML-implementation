@@ -136,8 +136,12 @@ def identify_root_causes(
     # Step 4 — assemble and save scored_logs_df
     # Drop temporal_proximity and all other processing-only columns.
     # Rename internal incident_id back to correlation_id (canonical schema name).
-    scored_logs_df = df[["sequence_number", "final_score", "label", "incident_id", "is_root_cause",
-                         "root_cause_confidence", "is_cross_system"]].copy()
+    _output_cols = ["sequence_number", "final_score", "label", "incident_id", "is_root_cause",
+                    "root_cause_confidence", "is_cross_system"]
+    # Audit flags from the scorer: True where the row's upstream score was
+    # mean-filled rather than computed (absent on legacy callers).
+    _output_cols += [c for c in ("anomaly_missing", "graph_missing") if c in df.columns]
+    scored_logs_df = df[_output_cols].copy()
     scored_logs_df = scored_logs_df.rename(columns={"incident_id": "correlation_id"})
 
     # Validate

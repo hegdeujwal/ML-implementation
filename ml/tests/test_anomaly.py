@@ -55,7 +55,7 @@ def build_features_df(n_rows: int = 200, n_sessions: int = 5) -> pd.DataFrame:
     """
     rng = np.random.default_rng(0)
     templates = ["ROUTE", "PORT_DOWN", "LOGIN", "HEALTH"]
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "sequence_number":          np.arange(1, n_rows + 1),
         "session_id":               [f"sess_{i % n_sessions}" for i in range(n_rows)],
         "template_id":              [templates[i % len(templates)] for i in range(n_rows)],
@@ -76,7 +76,18 @@ def build_features_df(n_rows: int = 200, n_sessions: int = 5) -> pd.DataFrame:
         "drop_rate_present":        rng.choice([0.0, 1.0], n_rows),
         "utilization":              rng.uniform(0.0, 100.0, n_rows),
         "utilization_present":      rng.choice([0.0, 1.0], n_rows),
+        # Rolling-slope trend features (std-normalised OLS slope + present flags)
+        "metric_slope_short":          rng.uniform(-3.0, 3.0, n_rows),
+        "metric_slope_short_present":  rng.choice([0.0, 1.0], n_rows),
+        "metric_slope_long":           rng.uniform(-3.0, 3.0, n_rows),
+        "metric_slope_long_present":   rng.choice([0.0, 1.0], n_rows),
     })
+    # Safety net: any IF feature added to config after this fixture was written
+    # gets a generic finite filler instead of breaking every detect() test.
+    for col in IF_FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = rng.uniform(0.0, 1.0, n_rows)
+    return df
 
 
 def _make_anomaly_df(n_rows: int = 100) -> pd.DataFrame:
@@ -186,6 +197,8 @@ class TestDetectScoreBounds:
         # Mirror the detector's configured flag strategy (see anomaly_detector Step 6).
         if score_std < 1e-6:
             expected = result["combined_score"] > ANOMALY_SCORE_THRESHOLD
+        elif ANOMALY_FLAG_MODE == "absolute":
+            expected = result["combined_score"] > ANOMALY_SCORE_THRESHOLD
         elif ANOMALY_FLAG_MODE == "quantile":
             threshold = float(np.quantile(scores, 1.0 - ANOMALY_CONTAMINATION))
             expected = result["combined_score"] >= threshold
@@ -248,6 +261,7 @@ class TestDetectEdgeCases:
         """When all decision_function values are equal, isolation_score == 0.5."""
         mock_pipeline = MagicMock()
         mock_pipeline.n_samples_seen_ = COLD_START_FULL_CONFIDENCE_THRESHOLD
+        mock_pipeline.calibration_ = None   # exercise the per-batch fallback path
         mock_pipeline.decision_function.return_value = np.ones(len(features_df))
 
         with patch("ml.anomaly_detector._train_model", return_value=mock_pipeline):
@@ -267,6 +281,7 @@ class TestDetectEdgeCases:
         # Mock _train_model so StandardScaler doesn't choke on NaN during fitting
         mock_pipeline = MagicMock()
         mock_pipeline.n_samples_seen_ = len(df)
+        mock_pipeline.calibration_ = None   # exercise the per-batch fallback path
         mock_pipeline.decision_function.return_value = np.zeros(len(df) - n_bad)
 
         with patch("ml.anomaly_detector._train_model", return_value=mock_pipeline):

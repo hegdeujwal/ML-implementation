@@ -11,6 +11,8 @@ Execution order
   4. correlation   correlation/run_correlation.py -> data/processed/graph_scores_df.parquet
   5. scoring       scoring/importance_scorer.py  -> data/processed/scored_logs_df.parquet
   5.5. cross_run  correlation/cross_run.py       -> data/processed/incident_history.parquet
+  5.9. evaluate   evaluation/oracle_report.py    -> evaluation/results/oracle_report.txt
+                  (skipped unless scenario_labels.parquet exists; never fatal)
   6. storage       storage/db_writer.py          -> Postgres (skipped in --dry-run)
 
 Usage
@@ -32,7 +34,7 @@ Usage
 
 Step names (for --from-step)
 -----------------------------
-  parsing | features | anomaly | correlation | scoring | storage
+  parsing | features | anomaly | correlation | scoring | cross_run | evaluate | storage
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ logger = get_logger(__name__)
 # Step ordering
 # ---------------------------------------------------------------------------
 
-STEPS = ["parsing", "features", "anomaly", "correlation", "scoring", "cross_run", "storage"]
+STEPS = ["parsing", "features", "anomaly", "correlation", "scoring", "cross_run", "evaluate", "storage"]
 
 # ---------------------------------------------------------------------------
 # Output paths
@@ -175,6 +177,29 @@ def _step_cross_run(dry_run: bool) -> int:
     return len(scored_df)
 
 
+def _step_evaluate() -> int:
+    """Evaluate pipeline output against the Section-7 oracle (P5.9).
+
+    Runs only when scenario_labels.parquet exists (i.e. the section-aware
+    synthetic-dataset loader produced ground truth). Non-fatal by design:
+    an evaluation failure must never block the storage step.
+    """
+    if not Path(cfg.SCENARIO_LABELS_PATH).exists():
+        logger.info(
+            "No scenario labels at %s — skipping oracle evaluation.",
+            cfg.SCENARIO_LABELS_PATH,
+        )
+        return 0
+
+    try:
+        from evaluation.oracle_report import run_oracle_report
+        metrics = run_oracle_report()
+        return metrics.get("total_logs", 0)
+    except Exception as exc:
+        logger.warning("Oracle evaluation failed (non-fatal): %s", exc)
+        return 0
+
+
 def _step_storage(dry_run: bool) -> int:
     """Write all parquets to Postgres (skipped in dry-run mode)."""
     if dry_run:
@@ -216,6 +241,8 @@ def _step_storage(dry_run: bool) -> int:
 
             # Populate incident rows used by the dashboard feed/detail pages.
             if Path("data/processed/root_causes_df.parquet").exists():
+                from common.utils import worst_label
+
                 rc_df = pd.read_parquet("data/processed/root_causes_df.parquet")
                 logs_df = pd.read_parquet(SESSIONIZED_PATH)
                 scores_with_ts = scored_df.merge(
@@ -229,7 +256,7 @@ def _step_storage(dry_run: bool) -> int:
                         start_time=("timestamp", "min"),
                         end_time=("timestamp", "max"),
                         log_count=("sequence_number", "count"),
-                        label=("label", "max"),
+                        label=("label", worst_label),
                     )
                     .reset_index()
                 )
@@ -310,6 +337,7 @@ def _run_step(
         "correlation": _step_correlation,
         "scoring":     _step_scoring,
         "cross_run":   lambda: _step_cross_run(dry_run),
+        "evaluate":    _step_evaluate,
         "storage":     lambda: _step_storage(dry_run),
     }
     return dispatch[step]()

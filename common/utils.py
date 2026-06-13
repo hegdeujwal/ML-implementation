@@ -6,11 +6,18 @@ Functions
 load_parquet(path)         -- load a parquet file with a helpful error on missing
 save_parquet(df, path)     -- save a parquet, creating parent dirs if needed
 validate_schema(df, cols)  -- raise ValueError if required columns are absent
+worst_label(labels)        -- most severe importance label by rank, not alphabet
 """
 
 from pathlib import Path
+from typing import Iterable, Optional
 
 import pandas as pd
+
+# Importance-label severity ranking (label_mapper output values).
+# A plain string max() is alphabetical and ranks "medium" above "critical" —
+# always compare labels through this map.
+LABEL_SEVERITY_RANK: dict = {"critical": 4, "medium": 3, "low": 2, "ignore": 1}
 
 
 def load_parquet(path: str) -> pd.DataFrame:
@@ -63,3 +70,19 @@ def validate_schema(df: pd.DataFrame, required_columns: list) -> None:
             f"DataFrame is missing required columns: {missing}\n"
             f"Present columns: {list(df.columns)}"
         )
+
+
+def worst_label(labels: Iterable) -> Optional[str]:
+    """Return the most severe label in `labels` by LABEL_SEVERITY_RANK.
+
+    Unknown labels rank 0 (below "ignore"); NaN/None entries are skipped.
+    Returns None for an empty input. Usable directly as a pandas groupby
+    aggregation function.
+
+    Args:
+        labels: Iterable of label strings (e.g. a groupby Series).
+    """
+    valid = [l for l in labels if isinstance(l, str)]
+    if not valid:
+        return None
+    return max(valid, key=lambda l: LABEL_SEVERITY_RANK.get(l, 0))

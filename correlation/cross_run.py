@@ -45,7 +45,7 @@ import pandas as pd
 
 import common.config as cfg
 from common.logger import get_logger
-from common.utils import load_parquet, save_parquet
+from common.utils import load_parquet, save_parquet, worst_label
 from correlation.fingerprint import (
     fingerprint_from_df,
     fingerprint_from_list,
@@ -65,9 +65,6 @@ _SCORED_PATH     = "data/processed/scored_logs_df.parquet"
 _ROOT_CAUSE_PATH = "data/processed/root_causes_df.parquet"
 _SESSION_PATH    = "data/processed/sessionized_logs.parquet"
 _HISTORY_PATH    = cfg.INCIDENT_HISTORY_PATH
-
-# Severity priority for determining the "worst" label in an incident
-_SEVERITY_RANK = {"critical": 4, "medium": 3, "low": 2, "ignore": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +262,7 @@ def _build_current_incidents(
 
         # Severity = worst label in the incident
         labels = grp["label"].dropna().unique().tolist() if "label" in grp.columns else []
-        severity = max(labels, key=lambda l: _SEVERITY_RANK.get(l, 0), default=None)
+        severity = worst_label(labels)
 
         incidents.append({
             "global_incident_id": global_id,

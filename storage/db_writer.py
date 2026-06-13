@@ -7,6 +7,7 @@ from psycopg2 import sql
 from psycopg2.extras import Json, execute_values
 
 from common.config import DB_URL
+from common.utils import worst_label
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 PROCESSED_DIR = Path("data/processed")
@@ -386,7 +387,7 @@ def load_pipeline_outputs():
                     start_time=("timestamp", "min"),
                     end_time=("timestamp", "max"),
                     log_count=("log_id", "count"),
-                    label=("label", "max"),
+                    label=("label", worst_label),
                 )
                 .reset_index()
             )

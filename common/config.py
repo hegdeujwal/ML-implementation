@@ -220,12 +220,32 @@ METRICS_DF_PATH: str = "data/processed/metrics_df.parquet"
 SCENARIO_LABELS_PATH: str = "data/processed/scenario_labels.parquet"
 
 # ---------------------------------------------------------------------------
+# Oracle evaluation (evaluation/oracle_report.py)
+# ---------------------------------------------------------------------------
+
+# Log levels that define ground-truth "signal" rows for evaluation.
+# Severity is deliberately excluded from IF_FEATURE_COLUMNS, so judging the
+# anomaly stage against severity-derived truth is fair (not circular).
+# final_score DOES carry a severity term (SCORING_SEVERITY_WEIGHT) — ranking
+# metrics computed against this truth are partially favoured by construction.
+ORACLE_TRUTH_SEVERITIES: list = ["CRITICAL", "HIGH", "ERROR"]
+
+# Where the oracle evaluation report text file is written.
+ORACLE_REPORT_PATH: str = "evaluation/results/oracle_report.txt"
+
+# ---------------------------------------------------------------------------
 # Persistent drift detection stores
 # ---------------------------------------------------------------------------
 
 # Welford online z-score baseline: one row per (host, template_id).
 # Accumulates mean/variance across pipeline runs for cross-run drift detection.
 ZSCORE_BASELINE_STORE_PATH: str = "data/processed/zscore_baseline_store.parquet"
+
+# Max session IDs remembered per (host, template_id) for re-run dedup in the
+# Welford store. Oldest evicted first (IDs embed the session start timestamp);
+# re-running a session older than the cap would double-count it — accepted
+# trade-off so the store stays bounded instead of growing forever.
+ZSCORE_BASELINE_SEEN_CAP: int = 500
 
 # Rolling feature store for IsolationForest sliding-window retraining.
 # Holds raw feature rows from the last FEATURE_ROLLING_MAX_SESSIONS sessions.
@@ -355,17 +375,26 @@ ANOMALY_SCORE_THRESHOLD: float = 0.5
 ANOMALY_DYNAMIC_K: float = 2.0
 
 # Anomaly-flag strategy:
+#   "absolute"  — flag combined_score > ANOMALY_SCORE_THRESHOLD. Scores are
+#                 calibrated against the training distribution (see
+#                 _train_model), so this threshold is comparable across runs
+#                 and CAN flag nothing on a healthy batch — quantile mode
+#                 cannot. Recalibrate the threshold once healthy-day data
+#                 exists (see docs/training_data_requirements.md).
 #   "quantile"  — flag the top ANOMALY_CONTAMINATION fraction by combined_score.
 #                 Self-adjusts to each batch and guarantees a stable, non-zero
-#                 anomaly rate.
+#                 anomaly rate — including on fully healthy batches, which is
+#                 why it is no longer the default.
 #   "dynamic_k" — legacy mean + k·std rule (kept for back-compat). Fragile: when
 #                 combined_score is tightly clustered the threshold can exceed the
 #                 max achievable score and flag nothing (observed: 0/935).
-ANOMALY_FLAG_MODE: str = "quantile"
+ANOMALY_FLAG_MODE: str = "absolute"
 
 # Expected fraction of the batch that is anomalous (top-N flagged in quantile mode).
-# Set to the measured signal rate of the synthetic dataset (~13% non-baseline logs).
-ANOMALY_CONTAMINATION: float = 0.13
+# Was 0.13 ("non-baseline" line rate of the synthetic dataset) — the oracle
+# harness measured the true severity-signal rate at ~2.1%, so 0.13 flagged ~6x
+# too many rows (precision 0.02). Kept near the true rate for quantile mode.
+ANOMALY_CONTAMINATION: float = 0.03
 
 # Sliding window: retrain on the last N sessions only.
 RETRAINING_SESSION_WINDOW: int = 50
@@ -393,9 +422,15 @@ SCORING_GRAPH_WEIGHT: float = 0.25
 SCORING_SEVERITY_WEIGHT: float = 0.25
 
 # Label thresholds: ignore / low / medium / critical
-LABEL_IGNORE_MAX: float = 0.2
-LABEL_LOW_MAX: float = 0.5
-LABEL_MEDIUM_MAX: float = 0.75
+# Retuned 2026-06-11 against the oracle report on the 7-day synthetic dataset:
+# the old (0.2/0.5/0.75) boundaries sat above the entire score distribution —
+# 0 rows ever reached "critical" and noise suppression was ~0. Current values
+# are anchored to the measured distribution (signal p1≈0.25, median≈0.31):
+# capture(med+)=0.55, signal ignored=0.3%, noise suppression=0.92.
+# Recalibrate alongside ANOMALY_SCORE_THRESHOLD once healthy-day data exists.
+LABEL_IGNORE_MAX: float = 0.25
+LABEL_LOW_MAX: float = 0.30
+LABEL_MEDIUM_MAX: float = 0.50
 # Anything above LABEL_MEDIUM_MAX → critical
 
 # DBSCAN clustering parameters (incident_clusterer.py)
@@ -410,6 +445,15 @@ ROOT_CAUSE_TOP_N: int = 3
 # filled with the column mean of the non-null rows. Boolean columns
 # (is_anomaly, in_graph, in_sequence) are always filled with False.
 MISSING_INPUT_FILL: str = "mean"
+
+# Hard cap on the fraction of rows allowed to be missing from an upstream
+# input before scoring FAILS instead of mean-filling. Mean-filling makes a
+# missing row look perfectly average — the most dangerous disguise for rows
+# that were dropped upstream precisely because something was wrong with them.
+# A few stragglers are tolerable; a systematic gap is a pipeline bug.
+# Rows that were filled are flagged in the anomaly_missing / graph_missing
+# output columns either way.
+SCORING_MAX_MISSING_FRACTION: float = 0.05
 
 # ---------------------------------------------------------------------------
 # Phase 5.5 — Cross-Run Incident Correlation
